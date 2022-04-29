@@ -1,0 +1,3581 @@
+---
+title: "PH vs DC"
+author: "Niamh Errington"
+date: "`r format(Sys.time(), '%d %B %Y')`" 
+output: 
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+    toc_collapsed: false
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE)
+library(kableExtra)
+```
+
+```{r, warning=FALSE, message=FALSE}
+library(pacman)
+p_load("kableExtra","caret","tidyverse","reshape2","e1071","JamesTools","OptimalCutpoints","Boruta","ggplot2","randomForest","ROCR","rpart","party","rpart.plot","partykit","glmnet","xgboost", "missForest", "mlr", "stringr", "readxl")
+```
+
+```{r, warning=FALSE, message=FALSE}
+#Data processing
+pheno <- read_csv("../Phenocleaning/phenotoclean.csv") 
+table(pheno$dana, pheno$PARTITION) %>% kable(., caption = "All patients dana") %>% kable_styling(full_width = TRUE)
+pheno <- pheno %>% filter(dana1 !="HC")
+load("../Phenocleaning/miRData.RData") 
+
+all <- left_join(select(pheno, SampleID, dana, ntprobnp, PARTITION), new, by = "SampleID")
+all$dana <- dplyr::recode(all$dana,  PH4 = "target", PH1.4 = "target", PH2 = "target", PH1.1 = "target", PH5 = "target", PH3 = "target", PH1.2 = "target", PH1.3 = "target", PH0_NOPH = "Cont", PH0_CTED = "Cont")
+all$dana <- as.factor(all$dana)
+
+discovery <- all[all$PARTITION == "TRAINING",] %>% select(-PARTITION, -ntprobnp)
+Interim <- all[all$PARTITION == "INTERIM",] %>% select(-PARTITION, -ntprobnp)
+Combined <- all[all$PARTITION != "VALIDATION",] %>% select(-PARTITION, -ntprobnp)
+Validation <-all[all$PARTITION == "VALIDATION",] %>% select(-PARTITION, -ntprobnp)
+
+validation_raw <- read_excel("/Volumes/GoogleDrive/Shared drives/MIREXS & Metabolon Retrospective Biomarker Study/Dec2020 new miRNA datafiles from MiREXES/validation_Dec_2020 (2).xlsx") %>% rename(SampleID = PID) %>% select(SampleID, starts_with("hsa"))
+colnames(validation_raw) <- gsub(pattern = "-", replacement = ".", x = colnames(validation_raw))
+validation_raw <- left_join(validation_raw, select(all, dana, SampleID), by = "SampleID") %>% filter(!is.na(dana))
+
+kable(table(Combined$dana))
+kable(table(Validation$dana)) 
+```
+
+# Feature selection
+
+## Boruta
+
+Select miRs which appear in at least 99 out of 100 runs of Boruta
+
+```{r}
+multi.boruta<- list()
+multi<- function(i){
+    fit.boruta <- Boruta(factor(dana)~., data=discovery[-1], maxRuns = 300, pValue = 0.01)
+boruta.df <- data.frame(attStats(fit.boruta))
+multi.boruta[[i]] <- rownames(boruta.df[boruta.df$decision =='Confirmed',])
+}
+repeatX<- c(1:100)
+multi.boruta<- lapply(repeatX, multi)
+```
+
+
+```{r}
+#See how many times each miRNA appears when boruta is run 100x
+multi.boruta<- as.data.frame(table(unlist(multi.boruta)))
+multi.boruta
+multi.boruta.mirs<- as.character(multi.boruta[which(multi.boruta$Freq>99),1])
+
+m<- paste(as.vector(multi.boruta.mirs, mode = "any"), collapse = "+")
+RFm<- paste("dana ~ ",m,sep = "")
+Boruta.data<- discovery[,which(colnames(discovery) %in% c("dana",as.character(multi.boruta.mirs)))]
+```
+
+```{r}
+control<- trainControl(method = 'repeatedcv',
+                       number = 10,
+                       repeats = 10, classProbs = TRUE, savePredictions = TRUE)
+metric <- "Accuracy"
+model_weights<- ifelse(Boruta.data$dana == names(table(Boruta.data$dana)[1]), (1/table(Boruta.data$dana)[1])* 0.5, (1/table(Boruta.data$dana)[2])* 0.5)
+set.seed(100)
+tunegrid <- expand.grid(.predFixed=sqrt(ncol(Boruta.data)), .minNode = 2)
+modellist<- list()
+for (ntree in c(1000, 1500, 2000, 2500)) {
+	set.seed(100)
+	fit <- caret::train(as.formula(RFm), data=Boruta.data, method="Rborist", metric=metric, tuneGrid=tunegrid, trControl=control, ntree=ntree, weight = model_weights)
+	key <- toString(ntree)
+	modellist[[key]] <- fit
+}
+
+# compare results
+results <- resamples(modellist)
+summary(results)
+res<- summary(results)
+res<- as.data.frame(res$statistics$Accuracy)
+kable(res)
+
+```
+
+```{r}
+ntree = as.numeric(rownames(res)[which(res$Mean == max(res$Mean))])[1]
+
+set.seed(100)
+tunegrid <- expand.grid(.predFixed=c(1:15), .minNode = 2)
+modellist<- list()
+	set.seed(100)
+	fit <- caret::train(as.formula(RFm), data=Boruta.data, method="Rborist", metric=metric, tuneGrid=tunegrid, trControl=control, ntree=ntree, weights = model_weights)
+
+```
+
+
+```{r}
+RFvars<-varImp(fit)[[1]]%>% filter(Overall > 0) %>% rownames_to_column() %>% arrange(desc(Overall)) %>% select(miR = rowname, RFIMP = Overall)
+Boruta.short.data<- discovery[,which(colnames(discovery) %in% c("dana", head(RFvars$miR, n =10)))]
+mshort<- paste(as.vector(head(RFvars$miR, n =10), mode = "any"), collapse = "+")
+RFmShort<- paste("dana ~ ",mshort,sep = "")
+```
+
+```{r}
+control<- trainControl(method = 'repeatedcv',
+                       number = 10,
+                       repeats = 10, classProbs = TRUE, savePredictions = TRUE)
+metric <- "Accuracy"
+model_weights<- ifelse(Boruta.short.data$dana == names(table(Boruta.short.data$dana)[1]), (1/table(Boruta.short.data$dana)[1])* 0.5, (1/table(Boruta.short.data$dana)[2])* 0.5)
+set.seed(100)
+tunegrid <- expand.grid(.predFixed=sqrt(ncol(Boruta.short.data)), .minNode = 2)
+modellist<- list()
+for (ntree in c(1000, 1500, 2000, 2500)) {
+	set.seed(100)
+	fit <- caret::train(as.formula(RFmShort), data=Boruta.short.data, method="Rborist", metric=metric, tuneGrid=tunegrid, trControl=control, ntree=ntree, weight = model_weights)
+	key <- toString(ntree)
+	modellist[[key]] <- fit
+}
+
+# compare results
+resultsshort <- resamples(modellist)
+summary(resultsshort)
+resshort<- summary(resultsshort)
+resshort<- as.data.frame(resshort$statistics$Accuracy)
+kable(resshort)
+
+```
+
+```{r}
+ntree = as.numeric(rownames(resshort)[which(resshort$Mean == max(resshort$Mean))])[1]
+
+set.seed(100)
+tunegrid <- expand.grid(.predFixed=c(1:7), .minNode = 2)
+modellist<- list()
+	set.seed(100)
+	fit <- caret::train(as.formula(RFmShort), data=Boruta.short.data, method="Rborist", metric=metric, tuneGrid=tunegrid, trControl=control, ntree=ntree, weights = model_weights)
+
+```
+
+### Confusion Matrix on training set
+
+```{r}
+tunegrid <- expand.grid(.predFixed=fit$bestTune$predFixed, .minNode = 2)
+
+fit.Boruta <- caret::train(as.formula(RFmShort), data=Boruta.short.data, method="Rborist", metric=metric, tuneGrid=tunegrid, trControl=control, ntree=ntree, weights = model_weights)
+
+Boruta.trained.preds <- predict(fit.Boruta, Boruta.short.data, type = "raw")
+confusionMatrix(as.factor(Boruta.trained.preds), discovery$dana, positive = "target")
+```
+
+### Confusion Matrix on Interim set
+
+```{r}
+Interim.boruta<- Interim[,c(colnames(Interim)%in% colnames(Boruta.short.data))]
+#Interim.boruta.short<- Interim.boruta[complete.cases(Interim.boruta),]
+Boruta.preds <- predict(fit.Boruta, Interim.boruta[-1], type = "raw")
+BorutaInterim<- confusionMatrix(as.factor(Boruta.preds), Interim.boruta$dana, positive = "target")
+BorutaInterim
+```
+
+## Rpart
+
+The `rpart` function from the [`rpart`](https://cran.r-project.org/web/packages/rpart/rpart.pdf) package can be utilised to grow a regression tree. This tree is built by splitting the data on the single variable which best splits the group in 2. Once the data is separated, this process is applied to each sub-group separately recursively until the subgroups reach a minimum size (defined as 3 below), or no improvement can be made. 
+
+Rpart uses a variable selection algorithm called recursive feature elimination (REF, also known as backward selection). Filtering before using Rpart has been shown to improve performance [(Medina et al., 2018)](https://books.google.co.uk/books?id=cdldDwAAQBAJ&pg=PA512&lpg=PA512&dq=filtering+step+before+rpart&source=bl&ots=nmHOKS6mND&sig=ACfU3U35RdZeW4Qa9EyzmmYO-D-_MDyQNw&hl=en&sa=X&ved=2ahUKEwjlsfHf0LjgAhXKQxUIHfnGAu8Q6AEwE3oECAsQAQ#v=onepage&q=filtering%20step%20before%20rpart&f=false)
+
+Method:
+
+1.	Fit model with all independent variables.
+
+2.	Calculate each variable's importance 
+
+3.	Use importance to rank all independent variables 
+
+4.	Remove the variable with the worst rank and build model using the remaining variables
+
+5.	Recalculate model accuracy.
+
+6.	Repeat steps 4 and 5 until all variables are used.
+
+7.	Rank variables based on when they were dropped.
+
+8. Cross-validate to select the best tree. Rpart by default conducts as many splits as possible, and cross-validation is used to prune the tree.
+
+```{r}
+	#Run rpart in caret
+		#train control
+tc <- trainControl(method="repeatedcv", number=10, repeats = 10, classProbs=TRUE, summaryFunction = twoClassSummary, savePredictions = TRUE)
+
+#minsplit - min no of observations that must exist in a node in order for a split to be attempted
+#minbucket - min no of observations in any terminal node
+	set.seed(100)
+fit.caret.rpart <- caret::train(dana ~ ., data=discovery[-1], method='rpart', metric="ROC", trControl=tc, control=rpart.control(minsplit=4, minbucket=5), parms = list(split='gini'), weights = model_weights, maxcompete =0) 
+
+	#Get predicted resultsfrom Rpart
+rpart.pred <- predict(fit.caret.rpart, discovery, type="prob")
+	#Get ROC curve and AUC
+pred.rpart <- ROCR::prediction(predict(fit.caret.rpart, discovery, type="prob")[,2], discovery$dana)
+	#AUC
+#auc.rpart <- performance(pred.rpart, "auc")@y.values[[1]]
+#plot(performance(pred.rpart, 'tpr', 'fpr'), main=paste("A from HV regression tree. AUC (of train set):", round(auc.rpart, 2)))
+
+ROCR::performance(pred.rpart, 'tpr', 'fpr')
+	#Fix names of miRs
+fit.caret.rpart$finalModel$frame$var <- gsub("_",'-', fit.caret.rpart$finalModel$frame$var)
+rpartmirs<- varImp(fit.caret.rpart)[[1]] %>% filter(Overall > 0) %>% rownames(.)
+fit.caret.rpart <- caret::train(dana ~ ., data=select(discovery, "dana", all_of(rpartmirs)), method='rpart', metric="ROC", trControl=tc, control=rpart.control(minsplit=4, minbucket=5), parms = list(split='gini'), weights = model_weights, maxcompete =0) 
+```
+
+```{r}
+prp(fit.caret.rpart$finalModel, main="Cluster A or B Rpart model", extra=2, varlen=0)
+plot(as.party(fit.caret.rpart$finalModel), main="Cluster A or B final Rpart model", drop_terminal=F)
+rpartmirs<- fit.caret.rpart$coefnames
+```
+
+### Confusion Matrix on training set
+```{r}
+predrpart <- predict(fit.caret.rpart, select(discovery, -dana))
+confusionMatrix(as.factor(predrpart), discovery$dana, positive = "target")
+```
+
+### Confusion Matrix on Interim set
+```{r}
+rpart.Interim<- Interim[,colnames(Interim)%in% c("dana", rpartmirs)]
+
+pred.rpart <- predict(fit.caret.rpart, select(rpart.Interim, -dana))
+RpartInterim<- confusionMatrix(as.factor(pred.rpart), rpart.Interim$dana, positive = "target")
+RpartInterim
+```
+
+## LASSO
+
+LASSO (Least Absolute Shrinkage and Selection Operator) is a feature selection method designed to reduce over-fitting. It automatically selects the significant variables by shrinking the coefficients of predictors deemed unimportant to zero. A simple explanation of LASSO can be found [here](http://statweb.stanford.edu/~tibs/lasso/simple.html).
+
+
+`Glmnet` ([Vignette](http://web.stanford.edu/~hastie/glmnet/glmnet_alpha.html)) is a package that uses penalised maximum likelihood to fit a generalised linear model. 
+
+In the plot above 'each curve corresponds to a variable. It shows the path of its coefficient against the L1-norm of the whole coefficient vector at as $\lambda$ varies. The axis above indicates the number of non-zero coefficients at the current $\lambda$, which is the effective degrees of freedom (df) for the lasso.'
+
+As such, it isn't possible to deduce which of the coefficients are 'best predictors' from the graph above, and some sort of cross-validation is necessary:
+
+`nfolds` parameter can be as large as the sample size (leave one out CV), but this is not recommended for large datasets.
+
+```{r}
+fit.glmcv <- cv.glmnet(x=as.matrix(select(discovery,-dana, -SampleID)), y=as.factor(discovery$dana), alpha=1, family='binomial', nfolds=10, type.measure = "deviance", weights = model_weights, dfmax = 12)
+summary(fit.glmcv)
+other.glmcv <- cv.glmnet(x=as.matrix(select(discovery,-dana, -SampleID)), y=as.factor(discovery$dana), alpha=1, family='binomial', nfolds=10, type.measure = "class", weights = model_weights, dfmax = 12)
+
+model.lambda <- fit.glmcv$lambda.min
+
+plot(fit.glmcv, cex.axis=1.5, cex.lab=1.5,cex.main=1.5)
+plot(other.glmcv, cex.axis=1, cex.lab=1, cex.main=1)
+```
+
+In the binomial deviance plot above, the red indicates the cross validation curve, and the the error bars show upper and lower standard deviation curves. 
+
+The two dotted lines show `lambda.min` - the value of $\lambda$ that gives minimum mean cross-validated error. The other $\lambda$ is `lambda.1se`, which gives the most regularised model such that the error is within 1 standard error of the minimum. 
+
+
+```{r}
+#refit model for new lambda
+fit.glm.new <- glmnet(x=as.matrix(select(discovery,-dana, -SampleID)), y=as.factor(discovery$dana), alpha=1, family='binomial', weights = model_weights, lambda = fit.glmcv$lambda, dfmax = 12)
+
+lasso.model<- fit.glm.new %>% coef() %>% as.matrix() %>% as.data.frame() %>% rownames_to_column %>% filter(abs(s0) >0)
+
+m.LASSO <- cbind("dana" = discovery$dana, discovery[,colnames(discovery) %in% lasso.model$rowname])
+
+control<- trainControl(method = 'repeatedcv',
+                       number = 10,
+                       repeats = 10,
+                       savePredictions = TRUE,
+                       classProbs = TRUE)
+
+tuneLASSO.min<- expand.grid(.alpha = 1, .lambda = fit.glmcv$lambda.min)
+LASSO.min<- caret::train(dana ~ ., data = select(discovery,-SampleID), method = "glmnet", trControl = control, family = 'binomial', tuneGrid = tuneLASSO.min, weights = model_weights)
+lasso.model.min<- coef(LASSO.min$finalModel, LASSO.min$bestTune$lambda) %>% as.matrix() %>% as.data.frame() %>% rownames_to_column %>% filter(abs(`1`) >0)
+LASSO.min.data<- discovery[,colnames(discovery) %in% c("dana", lasso.model.min$rowname[-1])]
+LASSO.min<- caret::train(dana ~ ., data = LASSO.min.data, method = "glmnet", trControl = control, family = 'binomial', tuneGrid = tuneLASSO.min, weights = model_weights)
+
+tuneLASSO.1se<- expand.grid(.alpha = 1, .lambda = fit.glmcv$lambda.1se)
+LASSO.1se<- caret::train(dana ~ ., data = select(discovery, -SampleID), method = "glmnet", trControl = control, family = 'binomial', tuneGrid = tuneLASSO.1se, weights = model_weights)
+lasso.model.1se<- coef(LASSO.1se$finalModel, LASSO.1se$bestTune$lambda) %>% as.matrix() %>% as.data.frame() %>% rownames_to_column %>% filter(abs(`1`) >0)
+LASSO.1se.data<- discovery[,colnames(discovery) %in% c("dana", lasso.model.1se$rowname[-1])]
+LASSO.1se<- caret::train(dana ~ ., data = LASSO.1se.data, method = "glmnet", trControl = control, family = 'binomial', tuneGrid = tuneLASSO.1se, weights = model_weights)
+
+kable(lasso.model.min, caption = paste("miRs retained by LASSO lambda.min: (",length(lasso.model.min $rowname),")")) %>% kable_styling(full_width = TRUE)
+kable(lasso.model.1se, caption = paste("miRs retained by LASSO lambda.1se: (",length(lasso.model.1se$rowname),")")) %>% kable_styling(full_width = TRUE)
+
+```
+
+### Confusion Matrix on training set
+
+```{r, eval = FALSE}
+probabilities<- predict(fit.glm.new, newx=as.matrix(select(discovery,-dana)),type = "response")
+predicted.classes <- ifelse(probabilities > 0.5, "Cont", "target")
+predicted.classes <- as.factor(predicted.classes)
+confusionMatrix(predicted.classes,discovery$dana, positive = "target")
+```
+
+### Confusion Matrix on interim set
+
+```{r}
+LASSO.pred.min <- predict(LASSO.min, newdata=select(Interim, colnames(LASSO.min.data),-dana))
+LASSOminInterim<- confusionMatrix(LASSO.pred.min,Interim$dana, positive = "target")
+LASSOminInterim
+LASSO.pred.1se<- predict(LASSO.1se, newdata=select(Interim, colnames(LASSO.1se.data),-dana))
+LASSO1seInterim<- confusionMatrix(LASSO.pred.1se,Interim$dana, positive = "target")
+LASSO1seInterim
+```
+
+## XGBoost
+
+[XGBoost](https://cran.r-project.org/web/packages/xgboost/xgboost.pdf) (**Ex**treme **G**radient **B**oosting) is an optimised distributed gradient boosting library that performs better than gradient boosting (GBM) framework alone. 
+
+Simple explanation with tutorial be found [here](https://www.hackerearth.com/practice/machine-learning/machine-learning-algorithms/beginners-tutorial-on-xgboost-parameter-tuning-r/tutorial/) and [here](https://www.hackerearth.com/practice/machine-learning/machine-learning-algorithms/beginners-tutorial-on-xgboost-parameter-tuning-r/tutorial/).
+
+### Parameters for tuning
+
+`nrounds` - maximum number of iterations (similar to no. of trees grown). 
+
+`eta` - [range: (0,1)] - learning rate. After every round, it shrinks the feature weights to reach the best optimum. Lower eta = slower computation 
+
+`gamma` [range: $(0,\infty)$] - controls regularisation (prevents over-fitting)
+
+`max_depth` [range: $(0,\infty)$] - controls the tree depth. The larger the depth, the more complex the model and the higher the chances of over-fitting. Larger data sets require deep trees
+
+`min_child_weight` [range: $(0,\infty)$] - In classification, if the leaf node has a minimum sum of instance weight lower than min_child_weight, the tree splitting stops. I.e. it stops potential future interactions to reduce over-fitting
+
+`subsample` [range: (0,1)] - Controls the number of samples supplied to a tree
+
+`colsample_bytree` [range: (0,1)] - controls the no. of features (variables) supplied to a tree
+
+| Parameter          | Default |Range       | Values attempted                | Final model |
+|--------------------|---------|------------|---------------------------------|-------------|
+|`nrounds`          | 100     |             | 100 - 10 000                    | 3950 |
+|`eta`              | 0.3     |(0,1)         |0.01, 0.025, 0.05, 0.1, 0.2, 0.3 | 0.1 |
+|`gamma`            | 0       | $(0,\infty)$ | 0,0.05, 0.1, 0.5, 0.7, 0.9, 1   | 0 |
+| `max_depth`       | 6       | $(0,\infty)$ | 1, 2, 3, 4, 5, 6, 7, 8, 9, 10   | 9 |
+|`colsample_bytree` | 1       | (0,1)       | 0.4, 0.6, 0.8, 1.0              | 1 |
+|`subsample`        | 1       | (0,1)       |0.5, 0.75, 1.0                   | 1 |
+|`min_child_weight` | 1       | $(0,\infty)$ | 1, 2, 3, 4, 5, 6               | 3 |
+
+`scale_pos_weight` = 746/257
+
+```{r}
+train<- data.matrix(select(discovery, -dana, -SampleID))
+labels<- discovery$dana
+
+#Set up XGBoost with default hyperparameters
+grid_default <- expand.grid(
+  nrounds = 100,
+  max_depth = 6,
+  eta = 0.3,
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = 1,
+  subsample = 1
+)
+
+train_control <- caret::trainControl(
+  method = "none",
+  verboseIter = FALSE, # no training log
+  allowParallel = TRUE # FALSE for reproducible results 
+)
+
+xgb_base<- caret::train( 
+  x = train,
+  y = as.factor(labels),
+  trControl = train_control,
+  tuneGrid = grid_default,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labels)[[1]]/table(labels)[[2]]
+  )
+
+nrounds<- seq(from = 100, to =1000, by = 50)
+#tune using caret
+tune_grid <- expand.grid(
+  #nrounds = seq(from = 100, to = 1000, by = 20),
+  nrounds = nrounds,
+  eta = c(0.025, 0.05, 0.1, 0.2, 0.3),
+  max_depth = c(1, 2, 3, 4, 5, 6),
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = 1,
+  subsample = 1
+)
+
+set.seed(25)
+tune_control <- caret::trainControl(
+  method = "cv", # cross-validation
+  number = 10, # with n folds
+  repeats = 10, #the no. of complete sets of folds to compute
+  #index = createFolds(tr_treated$Id_clean), # fix the folds
+  verboseIter = FALSE, # no training log
+  allowParallel = TRUE # FALSE for reproducible results 
+)
+
+set.seed(25)
+xgb_tune <- caret::train(
+  x = train,
+  y = as.factor(labels),
+  trControl = tune_control,
+  tuneGrid = tune_grid,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labels)[[1]]/table(labels)[[2]]
+)
+
+#function to help plot
+tuneplot <- function(x, probs = .90) {
+  ggplot(x) +
+    coord_cartesian(ylim = c(quantile(x$results$Accuracy, probs = probs), min(x$results$Accuracy))) +
+    theme_bw()
+}
+
+kable(xgb_tune$bestTune, caption = "1st tuning, best parameters")%>% kable_styling(full_width = TRUE)
+
+```
+
+
+```{r}
+tune_grid2 <- expand.grid(
+  nrounds = nrounds,
+  eta = xgb_tune$bestTune$eta,
+  max_depth = seq(from = 1, to =10, by = 1),
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = c(1,2,3,4,5,6),
+  subsample = 1
+)
+
+set.seed(25)
+xgb_tune2 <- caret::train(
+  x = train,
+  y = as.factor(labels),
+  trControl = tune_control,
+  tuneGrid = tune_grid2,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labels)[[1]]/table(labels)[[2]]
+)
+
+
+kable(xgb_tune2$bestTune, caption = "2nd tuning, best parameters")%>% kable_styling(full_width = TRUE)
+```
+
+
+```{r}
+tune_grid3 <- expand.grid(
+  nrounds = nrounds,
+  eta = xgb_tune$bestTune$eta,
+  max_depth = xgb_tune2$bestTune$max_depth,
+  gamma = 0,
+  colsample_bytree = c(0.4, 0.6, 0.8, 1.0),
+  min_child_weight = xgb_tune2$bestTune$min_child_weight,
+  subsample = c(0.5, 0.75, 1.0)
+)
+
+set.seed(25)
+xgb_tune3 <- caret::train(
+  x = train,
+  y = as.factor(labels),
+  trControl = tune_control,
+  tuneGrid = tune_grid3,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labels)[[1]]/table(labels)[[2]]
+)
+
+kable(xgb_tune3$bestTune, caption = "3rd tuning, best parameters")%>% kable_styling(full_width = TRUE)
+```
+
+```{r}
+tune_grid4 <- expand.grid(
+  nrounds = nrounds,
+  eta = xgb_tune$bestTune$eta,
+  max_depth = xgb_tune3$bestTune$max_depth,
+  gamma = c(0,0.05, 0.1, 0.5, 0.7, 0.9, 1),
+  colsample_bytree = xgb_tune3$bestTune$colsample_bytree,
+  min_child_weight = xgb_tune2$bestTune$min_child_weight,
+  subsample = xgb_tune3$bestTune$subsample
+)
+
+set.seed(25)
+xgb_tune4 <- caret::train(
+  x = train,
+  y = as.factor(labels),
+  trControl = tune_control,
+  tuneGrid = tune_grid4,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labels)[[1]]/table(labels)[[2]]
+)
+
+kable(xgb_tune4$bestTune, caption = "4th tuning, best parameters")%>% kable_styling(full_width = TRUE)
+```
+
+```{r}
+tune_grid5 <- expand.grid(
+  nrounds = seq(from = 100, to = 10000, by = 50),
+  eta = c(0.01,0.025,0.05,0.1,0.2,0.3),
+  max_depth = xgb_tune3$bestTune$max_depth,
+  gamma = xgb_tune4$bestTune$gamma,
+  colsample_bytree = xgb_tune3$bestTune$colsample_bytree,
+  min_child_weight = xgb_tune2$bestTune$min_child_weight,
+  subsample = xgb_tune3$bestTune$subsample
+)
+
+set.seed(25)
+xgb_tune5 <- caret::train(
+  x = train,
+  y = as.factor(labels),
+  trControl = tune_control,
+  tuneGrid = tune_grid5,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labels)[[1]]/table(labels)[[2]]
+)
+```
+
+
+```{r}
+final_grid <- expand.grid(
+  nrounds = xgb_tune5$bestTune$nrounds,
+  eta = xgb_tune5$bestTune$eta,
+  max_depth = xgb_tune5$bestTune$max_depth,
+  gamma = xgb_tune5$bestTune$gamma,
+  colsample_bytree = xgb_tune5$bestTune$colsample_bytree,
+  min_child_weight = xgb_tune5$bestTune$min_child_weight,
+  subsample = xgb_tune5$bestTune$subsample
+)
+
+set.seed(25)
+xgb_tune_final <- caret::train(
+  x = train,
+  y = as.factor(labels),
+  trControl = tune_control,
+  tuneGrid = final_grid,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labels)[[1]]/table(labels)[[2]]
+)
+```
+
+```{r}
+kable(xgb_tune_final$bestTune, caption = "Final tuning, best parameters")%>% kable_styling(full_width = TRUE)
+```
+
+```{r}
+xgb_imp<- varImp(xgb_tune_final, scale = FALSE)
+plot(xgb_imp)
+```
+
+### Confusion Matrix on training set
+
+```{r}
+xgbpredict<- predict(xgb_tune_final, train)
+confusionMatrix(xgbpredict, as.factor(labels), positive = "target")
+```
+
+### Confusion Matrix on Interim set
+
+```{r}
+test<- Interim[,colnames(Interim) %in% colnames(discovery)]
+testlabels<- test$dana
+test<- data.matrix(select(test,-dana))
+
+xgbpredict.testset<- predict(xgb_tune_final, test)
+confusionMatrix(xgbpredict.testset, as.factor(testlabels), positive = "target")
+```
+
+
+## XGBoost on selected miRs
+
+```{r}
+xgbmir<- head(rownames(xgb_imp$importance), n=10)
+xgb2<- select(discovery, c("dana", xgbmir))
+labels2<- xgb2$dana
+xgb2<- data.matrix(select(xgb2, -dana))
+
+#Set up XGBoost with default hyperparameters
+grid_default <- expand.grid(
+  nrounds = 100,
+  max_depth = 6,
+  eta = 0.3,
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = 1,
+  subsample = 1
+)
+
+train_control <- caret::trainControl(
+  method = "none",
+  verboseIter = FALSE, # no training log
+  allowParallel = TRUE # FALSE for reproducible results 
+)
+
+xgb_base_s<- caret::train( 
+  x = xgb2,
+  y = as.factor(labels2),
+  trControl = train_control,
+  tuneGrid = grid_default,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labels)[[1]]/table(labels)[[2]]
+  )
+
+nrounds<- seq(from = 100, to =1000, by = 50)
+#tune using caret
+tune_grid <- expand.grid(
+  #nrounds = seq(from = 100, to = 1000, by = 20),
+  nrounds = nrounds,
+  eta = c(0.025, 0.05, 0.1, 0.2, 0.3),
+  max_depth = c(1, 2, 3, 4, 5, 6),
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = 1,
+  subsample = 1
+)
+
+set.seed(25)
+tune_control <- caret::trainControl(
+  method = "repeatedcv", # cross-validation
+  number = 10, # with n folds
+  repeats = 10, #the no. of complete sets of folds to compute
+  #index = createFolds(tr_treated$Id_clean), # fix the folds
+  verboseIter = FALSE, # no training log
+  allowParallel = TRUE # FALSE for reproducible results 
+)
+
+set.seed(25)
+xgb_tune_s <- caret::train(
+  x = xgb2,
+  y = as.factor(labels2),
+  trControl = tune_control,
+  tuneGrid = tune_grid,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = (table(labels)[[1]]/table(labels)[[2]])
+                      )
+
+```
+
+```{r}
+tune_grid2s <- expand.grid(
+  nrounds = nrounds,
+  eta = xgb_tune_s$bestTune$eta,
+  max_depth = seq(from = 1, to =10, by = 1),
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = c(1,2,3,4,5,6),
+  subsample = 1
+)
+
+set.seed(25)
+xgb_tune2s <- caret::train(
+  x = xgb2,
+  y = as.factor(labels2),
+  trControl = tune_control,
+  tuneGrid = tune_grid2s,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labels)[[1]]/table(labels)[[2]]
+)
+
+
+kable(xgb_tune2s$bestTune, caption = "2nd tuning, best parameters")%>% kable_styling(full_width = TRUE)
+```
+
+```{r}
+tune_grid3s <- expand.grid(
+  nrounds = nrounds,
+  eta = xgb_tune_s$bestTune$eta,
+  max_depth = xgb_tune2s$bestTune$max_depth,
+  gamma = 0,
+  colsample_bytree = c(0.4, 0.6, 0.8, 1.0),
+  min_child_weight = xgb_tune2s$bestTune$min_child_weight,
+  subsample = c(0.5, 0.75, 1.0)
+)
+
+set.seed(25)
+xgb_tune3s <- caret::train(
+  x = xgb2,
+  y = as.factor(labels2),
+  trControl = tune_control,
+  tuneGrid = tune_grid3s,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labels)[[1]]/table(labels)[[2]]
+)
+
+kable(xgb_tune3s$bestTune, caption = "3rd tuning, best parameters")%>% kable_styling(full_width = TRUE)
+```
+
+```{r}
+tune_grid4s <- expand.grid(
+  nrounds = nrounds,
+  eta = xgb_tune_s$bestTune$eta,
+  max_depth = xgb_tune3s$bestTune$max_depth,
+  gamma = c(0,0.05, 0.1, 0.5, 0.7, 0.9, 1),
+  colsample_bytree = xgb_tune3s$bestTune$colsample_bytree,
+  min_child_weight = xgb_tune2s$bestTune$min_child_weight,
+  subsample = xgb_tune3s$bestTune$subsample
+)
+
+set.seed(25)
+xgb_tune4s <- caret::train(
+  x = xgb2,
+  y = as.factor(labels2),
+  trControl = tune_control,
+  tuneGrid = tune_grid4s,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labels)[[1]]/table(labels)[[2]]
+)
+
+kable(xgb_tune4s$bestTune, caption = "4th tuning, best parameters")%>% kable_styling(full_width = TRUE)
+```
+
+```{r}
+tune_grid5s <- expand.grid(
+  nrounds = seq(from = 100, to = 10000, by = 50),
+  eta = c(0.01,0.025,0.05,0.1,0.2,0.3),
+  max_depth = xgb_tune3s$bestTune$max_depth,
+  gamma = xgb_tune4s$bestTune$gamma,
+  colsample_bytree = xgb_tune3s$bestTune$colsample_bytree,
+  min_child_weight = xgb_tune2s$bestTune$min_child_weight,
+  subsample = xgb_tune3s$bestTune$subsample
+)
+
+set.seed(25)
+xgb_tune5s <- caret::train(
+  x = xgb2,
+  y = as.factor(labels2),
+  trControl = tune_control,
+  tuneGrid = tune_grid5s,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labels)[[1]]/table(labels)[[2]]
+)
+```
+
+```{r}
+final_grid_s <- expand.grid(
+  nrounds = xgb_tune5s$bestTune$nrounds,
+  eta = xgb_tune5s$bestTune$eta,
+  max_depth = xgb_tune5s$bestTune$max_depth,
+  gamma = xgb_tune5s$bestTune$gamma,
+  colsample_bytree = xgb_tune5s$bestTune$colsample_bytree,
+  min_child_weight = xgb_tune5s$bestTune$min_child_weight,
+  subsample = xgb_tune5s$bestTune$subsample
+)
+
+set.seed(25)
+tune_control <- caret::trainControl(
+  method = "repeatedcv", # cross-validation
+  number = 10, # with n folds
+  repeats = 10, #the no. of complete sets of folds to compute
+  #index = createFolds(tr_treated$Id_clean), # fix the folds
+  verboseIter = FALSE, # no training log
+  allowParallel = TRUE, # FALSE for reproducible results 
+  savePredictions = TRUE,
+  classProbs = TRUE
+  )
+
+set.seed(25)
+xgb_tune_final_s <- caret::train(
+  x = xgb2,
+  y = as.factor(labels2),
+  trControl = tune_control,
+  tuneGrid = final_grid_s,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labels)[[1]]/table(labels)[[2]]
+)
+```
+
+```{r}
+kable(xgb_tune_final_s$bestTune, caption = "Final tuning, best parameters")%>% kable_styling(full_width = TRUE)
+```
+
+```{r}
+test.short<- test[,colnames(xgb2)]
+xgbpredict.testset.s<- predict(xgb_tune_final_s, test.short)
+XGBInterim<- confusionMatrix(xgbpredict.testset.s, as.factor(testlabels), positive = "target")
+XGBInterim
+```
+
+# Overlapping miRs
+
+```{r}
+#get list of any mir appearing in a feature selection method
+allmirs<- unique(c(lasso.model$rowname[-1], rownames(multi.boruta.mirs), rpartmirs, xgbmir))
+#get list of mirs appearing in at least 2 feature selection methods
+dupmirs<- unique(c(lasso.model$rowname, rownames(multi.boruta.mirs), rpartmirs, xgbmir)[duplicated(c(lasso.model$rowname, rownames(multi.boruta.mirs), rpartmirs, xgbmir))])
+```
+
+```{r}
+#pick mirs selected by any of the 3 methods
+selectedmirs <- c("dana",dupmirs)
+
+#reduce ml.data2 to contain only mirs in selectedmirs
+selecmirs<- discovery[,which(colnames(discovery) %in% selectedmirs)]
+#melt dataframe so ggplot can be used
+df<- melt(selecmirs, id.var = "dana") %>% mutate (dana = factor(dana, ))
+ggplot(data = df, aes(x= variable, y=value)) + geom_boxplot(aes(fill=dana)) + theme(text = element_text(size=12), axis.text.x=element_text(angle=90, vjust=0.5, size = 12),axis.text.y=element_text(size = 12)) + labs(x="", y="Expression", size = 12)
+
+```
+
+# CV ROCs
+
+## Boruta
+
+```{r, message=FALSE, warning = FALSE}
+boruta.split<- split(fit.Boruta$pred, fit.Boruta$pred$Resample)
+lapply(repeatX, function(d) {
+  pROC::auc(pROC::roc(predictor = boruta.split[[d]]$target, response = boruta.split[[d]]$obs))[1]
+}) %>% unlist() %>% hist(main = paste("Boruta CV mean AUC:", round(mean(.),2)))
+
+```
+
+## Rpart
+
+```{r, warning=FALSE, message=FALSE}
+rpart.auc<- list()
+rpart.split<- split(fit.caret.rpart$pred, fit.caret.rpart$pred$Resample)
+lapply(repeatX, function(d) {
+  pROC::auc(pROC::roc(predictor = rpart.split[[d]]$target, response = rpart.split[[d]]$obs))[1]
+}) %>% unlist() %>% hist(main = paste("Rpart CV mean AUC:", round(mean(.),2)))
+
+```
+
+## LASSO (caret model - lambda min)
+
+```{r, warning = FALSE, message=FALSE}
+LASSO.split.min<- split(LASSO.min$pred, LASSO.min$pred$Resample)
+lapply(repeatX, function(d) {
+  pROC::auc(pROC::roc(predictor = LASSO.split.min[[d]]$target, response = LASSO.split.min[[d]]$obs))[1]
+}) %>% unlist() %>% hist(main = paste("LASSO CV mean AUC:", round(mean(.),2)))
+
+```
+
+## LASSO (caret model - lambda 1se)
+
+```{r, warning = FALSE, message=FALSE}
+LASSO.split.1se<- split(LASSO.1se$pred, LASSO.1se$pred$Resample)
+lapply(repeatX, function(d) {
+  pROC::auc(pROC::roc(predictor = LASSO.split.1se[[d]]$target, response = LASSO.split.1se[[d]]$obs))[1]
+}) %>% unlist() %>% hist(main = paste("LASSO CV mean AUC:", round(mean(.),2)))
+
+```
+
+## XGBoost
+
+```{r, warning = FALSE, message=FALSE}
+tosplit<- xgb_tune_final_s
+XGB.split<- split(tosplit$pred, tosplit$pred$Resample)
+parallel::mclapply(repeatX, function(d) {
+  pROC::auc(pROC::roc(predictor = XGB.split[[d]]$target, response = XGB.split[[d]]$obs))[1]
+}) %>% unlist() %>% hist(main = paste("XGBoost CV mean AUC:", round(mean(.),2)))
+```
+
+# ROC on interim set
+
+## Boruta
+
+```{r}
+Boruta.perf<- predict(fit, select(Interim.boruta, -dana), type= "prob")
+Boruta.auc<- pROC::auc(predictor = Boruta.perf$target, response = Interim.boruta$dana)
+plot(pROC::roc(predictor = Boruta.perf$target, response = Interim.boruta$dana), main = paste("AUC:", round(Boruta.auc,2)))
+
+```
+
+## Rpart
+
+```{r}
+rpart.perf<- predict(fit.caret.rpart, select(rpart.Interim, -dana), type= "prob")
+rpart.auc<- pROC::auc(predictor = rpart.perf$target, response = rpart.Interim$dana)
+plot(pROC::roc(predictor = rpart.perf$target, response = rpart.Interim$dana), main = paste("AUC:", round(rpart.auc,2)))
+```
+
+## LASSO lambda min
+
+```{r}
+LASSO.probs.min <- predict(LASSO.min, newdata=select(Interim, colnames(LASSO.min.data),-dana), type = "prob")
+LASSO.auc.min<- pROC::auc(predictor = LASSO.probs.min$target, response = Interim$dana)
+plot(pROC::roc(predictor = LASSO.probs.min$target, response = Interim$dana), main = paste("AUC:", round(LASSO.auc.min,2)))
+
+```
+
+## LASSO lambda 1se
+
+```{r}
+LASSO.probs.1se <- predict(LASSO.1se, newdata=select(Interim, colnames(LASSO.1se.data),-dana), type = "prob")
+LASSO.auc.1se<- pROC::auc(predictor = LASSO.probs.1se$target, response = Interim$dana)
+plot(pROC::roc(predictor = LASSO.probs.1se$target, response = Interim$dana), main = paste("AUC:", round(LASSO.auc.1se,2)))
+```
+
+## XGBoost
+
+```{r}
+xgbpreds<- predict(xgb_tune_final_s, test.short, type = "prob")
+xgb.auc<- pROC::auc(predictor = xgbpreds$target, response = testlabels)
+plot(pROC::roc(predictor = xgbpreds$target, response = testlabels), main = paste("AUC:", round(xgb.auc,2)))
+```
+
+# Selected miRs & Variable Importance
+
+```{r}
+kable(table(discovery$dana), caption = "Groups in training set")
+kable(table(Interim$dana), caption = "Groups in interim set")
+```
+
+```{r, message=FALSE}
+RFvars<-varImp(fit.Boruta)[[1]]%>% filter(Overall > 0) %>% rownames_to_column() %>% arrange(desc(Overall)) %>% select(miR = rowname, RFIMP = Overall)
+rpartvars<- varImp(fit.caret.rpart)[[1]] %>% filter(Overall > 0) %>% rownames_to_column() %>% arrange(desc(Overall)) %>% select(miR = rowname, rpartIMP = Overall) 
+LASSOminvars<- varImp(LASSO.min)[[1]]  %>% filter(Overall > 0)%>% rownames_to_column() %>% arrange(desc(Overall)) %>% select(miR = rowname, LASSOminIMP = Overall)
+LASSO1sevars<- varImp(LASSO.1se)[[1]]  %>% filter(Overall > 0) %>% rownames_to_column() %>% arrange(desc(Overall)) %>% select(miR = rowname, LASSO1seIMP = Overall)
+XGBvars<- varImp(xgb_tune_final_s)[[1]]%>% filter(Overall > 0) %>% rownames_to_column() %>% arrange(desc(Overall)) %>% select(miR = rowname, XGBIMP = Overall)
+allimps <- dplyr::full_join(x = RFvars, y=  rpartvars) %>% full_join(x=., y=LASSOminvars) %>% full_join(x=., y=LASSO1sevars) %>% full_join(x=., XGBvars)
+
+kable(RFvars, caption = paste("RF miRNAs (", length(RFvars$miR), ")"))
+rpart.vars<-labels(fit.caret.rpart$finalModel)[-1]
+rpart.vars<- gsub("<.*","", rpart.vars)
+rpart.vars<- unique(gsub(">.*","", rpart.vars))
+kable(rpartvars, caption = paste("Rpart miRs: (",length(rpartvars$miR),")"))
+kable(LASSOminvars, caption = paste("LASSO min miRs: (", length(LASSOminvars$miR),")"))
+kable(LASSO1sevars, caption = paste("LASSO 1se miRs: (", length(LASSO1sevars$miR),")"))
+kable(XGBvars, caption = paste("XGBoost miRs: (",length(XGBvars$miR),")"))
+```
+
+# Discovery + Interim
+
+```{r}
+#run boruta
+multi.boruta.DI<- list()
+multi<- function(i){
+    fit.boruta <- Boruta(factor(dana)~., data=select(Combined, -SampleID), maxRuns = 300, pValue = 0.01)
+boruta.df <- data.frame(attStats(fit.boruta))
+multi.boruta.DI[[i]] <- rownames(boruta.df[boruta.df$decision =='Confirmed',])
+}
+repeatX<- c(1:100)
+multi.boruta.DI<- lapply(repeatX, multi)
+
+#See how many times each miRNA appears when boruta is run 100x
+multi.boruta.DI<- as.data.frame(table(unlist(multi.boruta.DI)))
+multi.boruta.mirs.DI<- as.character(multi.boruta.DI[which(multi.boruta.DI$Freq>94),1])
+multi.boruta.DI
+```
+
+
+```{r}
+m2<- paste(as.vector(as.character(multi.boruta.DI$Var1), mode = "any"), collapse = "+")
+
+RFm2<- paste("dana ~ ", m2,sep = "")
+Boruta.data.DI<- Combined[,which(colnames(Combined) %in% c("dana",as.character(multi.boruta.DI$Var1)))]
+```
+
+```{r}
+
+control<- trainControl(method = 'repeatedcv',
+                       number = 10,
+                       repeats = 10, savePredictions = TRUE, classProbs = TRUE)
+metric <- "Accuracy"
+
+model_weights<- ifelse(Boruta.data.DI$dana == names(table(Boruta.data.DI$dana)[1]), (1/table(Boruta.data.DI$dana)[1])* 0.5, (1/table(Boruta.data.DI$dana)[2])* 0.5)
+tunegrid <- expand.grid(.predFixed=sqrt(ncol(Boruta.data.DI)), .minNode = 2)
+modellist<- list()
+
+for (ntree in c(1000, 1500, 2000, 2500)) {
+	set.seed(100)
+	fit.DI <- caret::train(as.formula(RFm2), data=Boruta.data.DI, method="Rborist", metric=metric, tuneGrid=tunegrid, trControl=control, ntree=ntree, weights = model_weights)
+	key <- toString(ntree)
+	modellist[[key]] <- fit.DI
+}
+
+# compare results
+resultsDI <- resamples(modellist)
+resDI<- summary(resultsDI)
+resDI<- as.data.frame(resDI$statistics$Accuracy)
+kable(resDI)%>% kable_styling(full_width = TRUE)
+
+ntree = as.numeric(rownames(resDI)[which(resDI$Mean == max(resDI$Mean))])[1]
+
+set.seed(100)
+tunegrid <- expand.grid(.predFixed=c(1:15), .minNode = 2)
+modellist<- list()
+	set.seed(100)
+	fit.DI <- caret::train(as.formula(RFm2), data=Boruta.data.DI, method="Rborist", metric=metric, tuneGrid=tunegrid, trControl=control, ntree=ntree, weights = model_weights)
+
+```
+
+```{r}
+RFvarsDI<-varImp(fit.DI)[[1]]%>% filter(Overall > 0) %>% rownames_to_column() %>% arrange(desc(Overall)) %>% select(miR = rowname, RFIMP = Overall)
+Boruta.data.DI<- Combined[,which(colnames(Combined) %in% c("dana", head(RFvarsDI$miR, n =10)))]
+mshort2<- paste(as.vector(head(RFvarsDI$miR, n =10), mode = "any"), collapse = "+")
+RFmShort2<- paste("dana ~ ",mshort2,sep = "")
+
+control<- trainControl(method = 'repeatedcv',
+                       number = 10,
+                       repeats = 10, classProbs = TRUE, savePredictions = TRUE)
+metric <- "Accuracy"
+model_weights<- ifelse(Boruta.data.DI$dana == names(table(Boruta.data.DI$dana)[1]), (1/table(Boruta.data.DI$dana)[1])* 0.5, (1/table(Boruta.data.DI$dana)[2])* 0.5)
+set.seed(100)
+tunegrid <- expand.grid(.predFixed=sqrt(ncol(Boruta.data.DI)), .minNode = 2)
+modellist<- list()
+for (ntree in c(1000, 1500, 2000, 2500)) {
+	set.seed(100)
+	fit.DI <- caret::train(as.formula(RFmShort2), data=Boruta.data.DI, method="Rborist", metric=metric, tuneGrid=tunegrid, trControl=control, ntree=ntree, weight = model_weights)
+	key <- toString(ntree)
+	modellist[[key]] <- fit.DI
+}
+
+# compare results
+resultsshort <- resamples(modellist)
+summary(resultsshort)
+resshort<- summary(resultsshort)
+resshort<- as.data.frame(resshort$statistics$Accuracy)
+kable(resshort)
+
+ntree = as.numeric(rownames(resshort)[which(resshort$Mean == max(resshort$Mean))])[1]
+
+set.seed(100)
+tunegrid <- expand.grid(.predFixed=c(1:9), .minNode = 2)
+modellist<- list()
+	set.seed(100)
+	fit.DI <- caret::train(as.formula(RFmShort2), data=Boruta.data.DI, method="Rborist", metric=metric, tuneGrid=tunegrid, trControl=control, ntree=ntree, weights = model_weights)
+
+tunegrid <- expand.grid(.predFixed=fit.DI$bestTune$predFixed, .minNode = 2)
+
+fit.Boruta.DI <- caret::train(as.formula(RFmShort2), data=Boruta.data.DI, method="Rborist", metric=metric, tuneGrid=tunegrid, trControl=control, ntree=ntree, weights = model_weights)
+Boruta.trained.predsDI <- predict(fit.Boruta.DI, Boruta.data.DI, type = "raw")
+```
+
+
+```{r}
+	#Run rpart in caret
+		#train control
+tc <- trainControl(method="repeatedcv", number=10, repeats = 10, classProbs=TRUE, summaryFunction = twoClassSummary, savePredictions = TRUE)
+
+	set.seed(100)
+fit.caret.rpart.DI <- caret::train(dana ~ ., data=select(Combined, -SampleID), method='rpart', metric="ROC", trControl=tc, control=rpart.control(minsplit=4, minbucket=5), parms = list(split='gini'), weights = model_weights) 
+
+	#Get predicted resultsfrom Rpart
+rpart.pred.DI <- predict(fit.caret.rpart.DI, Combined, type="prob")
+pred.rpart.DI <- ROCR::prediction(predict(fit.caret.rpart.DI, Combined, type="prob")[,2], Combined$dana)
+
+ROCR::performance(pred.rpart.DI, 'tpr', 'fpr')
+	#Fix names of miRs
+fit.caret.rpart.DI$finalModel$frame$var <- gsub("_",'-', fit.caret.rpart.DI$finalModel$frame$var)
+rpart.vars.DI<-labels(fit.caret.rpart.DI$finalModel)[-1]
+rpart.vars.DI<- gsub("<.*","", rpart.vars.DI)
+rpart.vars.DI<- unique(gsub(">.*","", rpart.vars.DI))
+
+rpartmirsDI<- varImp(fit.caret.rpart.DI)[[1]] %>% filter(Overall > 0) %>% rownames(.)
+fit.caret.rpart.DI <- caret::train(dana ~ ., data=select(Combined, "dana", all_of(rpartmirsDI)), method='rpart', metric="ROC", trControl=tc, control=rpart.control(minsplit=4, minbucket=5), parms = list(split='gini'), weights = model_weights, maxcompete =0) 
+
+prp(fit.caret.rpart.DI$finalModel, main="Cluster A or B Rpart model", extra=2, varlen=0)
+plot(as.party(fit.caret.rpart.DI$finalModel), main="Cluster A or B final Rpart model", drop_terminal=F)
+```
+
+```{r}
+fit.glm.DI <- glmnet(x=as.matrix(select(Combined, -dana, -SampleID)), y=as.factor(Combined$dana), alpha=1, family='binomial')
+summary(fit.glm.DI)
+
+fit.glmcv.DI <- cv.glmnet(x=as.matrix(select(Combined, -dana, -SampleID)), y=as.factor(Combined$dana), alpha=1, family='binomial', nfolds=10, type.measure = "deviance", dfmax = 12)
+summary(fit.glmcv.DI)
+other.glmcv.DI <- cv.glmnet(x=as.matrix(select(Combined, -dana, -SampleID)), y=as.factor(Combined$dana), alpha=1, family='binomial', nfolds=10, type.measure = "class", dfmax = 12)
+```
+
+```{r}
+tuneLASSO.min.DI<- expand.grid(.alpha = 1, .lambda = fit.glmcv.DI$lambda.min)
+LASSO.min.DI<- caret::train(dana ~ ., data = select(Combined, -SampleID), method = "glmnet", trControl = control, family = 'binomial', tuneGrid = tuneLASSO.min.DI, weights = model_weights)
+lasso.model.min.DI<- coef(LASSO.min.DI$finalModel, LASSO.min.DI$bestTune$lambda) %>% as.matrix() %>% as.data.frame() %>% rownames_to_column %>% filter(abs(`1`) >0)
+LASSO.min.dataDI<- Combined[,colnames(Combined) %in% c("dana", lasso.model.min.DI$rowname[-1])]
+LASSO.min.DI<- caret::train(dana ~ ., data = LASSO.min.dataDI, method = "glmnet", trControl = control, family = 'binomial', tuneGrid = tuneLASSO.min.DI, weights = model_weights)
+
+
+tuneLASSO.1se.DI<- expand.grid(.alpha = 1, .lambda = fit.glmcv.DI$lambda.1se)
+LASSO.1se.DI<- caret::train(dana ~ ., data = select(Combined, -SampleID), method = "glmnet", trControl = control, family = 'binomial', tuneGrid = tuneLASSO.1se.DI, weights = model_weights)
+lasso.model.1se.DI<- coef(LASSO.1se.DI$finalModel, LASSO.1se.DI$bestTune$lambda) %>% as.matrix() %>% as.data.frame() %>% rownames_to_column %>% filter(abs(`1`) >0)
+LASSO.1se.dataDI<- Combined[,colnames(Combined) %in% c("dana", lasso.model.1se.DI$rowname[-1])]
+LASSO.1se.DI<- caret::train(dana ~ ., data = LASSO.1se.dataDI, method = "glmnet", trControl = control, family = 'binomial', tuneGrid = tuneLASSO.1se.DI, weights = model_weights)
+
+```
+
+```{r}
+trainTI<- data.matrix(select(Combined, -dana, -SampleID))
+labelsTI<- Combined$dana
+
+#Set up XGBoost with default hyperparameters
+grid_default <- expand.grid(
+  nrounds = 100,
+  max_depth = 6,
+  eta = 0.3,
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = 1,
+  subsample = 1
+)
+
+train_control <- caret::trainControl(
+  method = "none",
+  verboseIter = FALSE, # no training log
+  allowParallel = TRUE # FALSE for reproducible results 
+)
+
+xgb_baseTI<- caret::train( 
+  x = trainTI,
+  y = as.factor(labelsTI),
+  trControl = train_control,
+  tuneGrid = grid_default,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labelsTI)[[1]]/table(labelsTI)[[2]]
+  )
+
+nrounds<- seq(from = 100, to =1000, by = 50)
+#tune using caret
+tune_gridTI <- expand.grid(
+  #nrounds = seq(from = 100, to = 1000, by = 20),
+  nrounds = nrounds,
+  eta = c(0.025, 0.05, 0.1, 0.2, 0.3),
+  max_depth = c(1, 2, 3, 4, 5, 6),
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = 1,
+  subsample = 1
+)
+
+set.seed(25)
+tune_control <- caret::trainControl(
+  method = "cv", # cross-validation
+  number = 10, # with n folds
+  repeats = 10, #the no. of complete sets of folds to compute
+  #index = createFolds(tr_treated$Id_clean), # fix the folds
+  verboseIter = FALSE, # no training log
+  allowParallel = TRUE # FALSE for reproducible results 
+)
+
+set.seed(25)
+xgb_tuneTI <- caret::train(
+  x = trainTI,
+  y = as.factor(labelsTI),
+  trControl = tune_control,
+  tuneGrid = tune_gridTI,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labelsTI)[[1]]/table(labelsTI)[[2]]
+)
+
+#function to help plot
+tuneplot <- function(x, probs = .90) {
+  ggplot(x) +
+    coord_cartesian(ylim = c(quantile(x$results$Accuracy, probs = probs), min(x$results$Accuracy))) +
+    theme_bw()
+}
+
+kable(xgb_tuneTI$bestTune, caption = "1st tuning, best parameters")%>% kable_styling(full_width = TRUE)
+
+tune_grid2TI <- expand.grid(
+  nrounds = nrounds,
+  eta = xgb_tuneTI$bestTune$eta,
+  max_depth = seq(from = 1, to =10, by = 1),
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = c(1,2,3,4,5,6),
+  subsample = 1
+)
+
+set.seed(25)
+xgb_tune2TI <- caret::train(
+  x = trainTI,
+  y = as.factor(labelsTI),
+  trControl = tune_control,
+  tuneGrid = tune_grid2TI,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labelsTI)[[1]]/table(labelsTI)[[2]]
+)
+
+kable(xgb_tune2TI$bestTune, caption = "2nd tuning, best parameters")%>% kable_styling(full_width = TRUE)
+
+tune_grid3TI <- expand.grid(
+  nrounds = nrounds,
+  eta = xgb_tuneTI$bestTune$eta,
+  max_depth = xgb_tune2TI$bestTune$max_depth,
+  gamma = 0,
+  colsample_bytree = c(0.4, 0.6, 0.8, 1.0),
+  min_child_weight = xgb_tune2TI$bestTune$min_child_weight,
+  subsample = c(0.5, 0.75, 1.0)
+)
+
+set.seed(25)
+xgb_tune3TI <- caret::train(
+  x = trainTI,
+  y = as.factor(labelsTI),
+  trControl = tune_control,
+  tuneGrid = tune_grid3TI,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labelsTI)[[1]]/table(labelsTI)[[2]]
+)
+
+kable(xgb_tune3TI$bestTune, caption = "3rd tuning, best parameters")%>% kable_styling(full_width = TRUE)
+
+tune_grid4TI <- expand.grid(
+  nrounds = nrounds,
+  eta = xgb_tuneTI$bestTune$eta,
+  max_depth = xgb_tune3TI$bestTune$max_depth,
+  gamma = c(0,0.05, 0.1, 0.5, 0.7, 0.9, 1),
+  colsample_bytree = xgb_tune3TI$bestTune$colsample_bytree,
+  min_child_weight = xgb_tune2TI$bestTune$min_child_weight,
+  subsample = xgb_tune3TI$bestTune$subsample
+)
+
+set.seed(25)
+xgb_tune4TI <- caret::train(
+  x = trainTI,
+  y = as.factor(labelsTI),
+  trControl = tune_control,
+  tuneGrid = tune_grid4TI,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labelsTI)[[1]]/table(labelsTI)[[2]]
+)
+
+kable(xgb_tune4TI$bestTune, caption = "4th tuning, best parameters")%>% kable_styling(full_width = TRUE)
+
+tune_grid5TI <- expand.grid(
+  nrounds = seq(from = 100, to = 10000, by = 50),
+  eta = c(0.01,0.025,0.05,0.1,0.2,0.3),
+  max_depth = xgb_tune3TI$bestTune$max_depth,
+  gamma = xgb_tune4TI$bestTune$gamma,
+  colsample_bytree = xgb_tune3TI$bestTune$colsample_bytree,
+  min_child_weight = xgb_tune2TI$bestTune$min_child_weight,
+  subsample = xgb_tune3TI$bestTune$subsample
+)
+
+set.seed(25)
+xgb_tune5TI <- caret::train(
+  x = trainTI,
+  y = as.factor(labelsTI),
+  trControl = tune_control,
+  tuneGrid = tune_grid5TI,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labelsTI)[[1]]/table(labelsTI)[[2]]
+)
+```
+
+
+```{r}
+final_gridTI <- expand.grid(
+  nrounds = xgb_tune5TI$bestTune$nrounds,
+  eta = xgb_tune5TI$bestTune$eta,
+  max_depth = xgb_tune5TI$bestTune$max_depth,
+  gamma = xgb_tune5TI$bestTune$gamma,
+  colsample_bytree = xgb_tune5TI$bestTune$colsample_bytree,
+  min_child_weight = xgb_tune5TI$bestTune$min_child_weight,
+  subsample = xgb_tune5TI$bestTune$subsample
+)
+
+set.seed(25)
+xgb_tune_finalTI <- caret::train(
+  x = trainTI,
+  y = as.factor(labelsTI),
+  trControl = tune_control,
+  tuneGrid = final_gridTI,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labelsTI)[[1]]/table(labelsTI)[[2]]
+)
+```
+
+```{r}
+kable(xgb_tune_finalTI$bestTune, caption = "Final tuning, best parameters")%>% kable_styling(full_width = TRUE)
+```
+
+```{r}
+xgb_impTI<- varImp(xgb_tune_finalTI, scale = FALSE)
+plot(xgb_impTI)
+```
+
+```{r}
+xgbmirTI<- head(rownames(xgb_impTI$importance), n=10)
+xgb2TI<- select(Combined, c("dana", xgbmirTI))
+labels2TI<- xgb2TI$dana
+xgb2TI<- data.matrix(xgb2TI[-1])
+
+#Set up XGBoost with default hyperparameters
+
+train_control <- caret::trainControl(
+  method = "none",
+  verboseIter = FALSE, # no training log
+  allowParallel = TRUE # FALSE for reproducible results 
+)
+
+xgb_base_sTI<- caret::train( 
+  x = xgb2TI,
+  y = as.factor(labels2TI),
+  trControl = train_control,
+  tuneGrid = grid_default,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labelsTI)[[1]]/table(labelsTI)[[2]]
+  )
+
+nrounds<- seq(from = 100, to =1000, by = 50)
+#tune using caret
+tune_grid <- expand.grid(
+  #nrounds = seq(from = 100, to = 1000, by = 20),
+  nrounds = nrounds,
+  eta = c(0.025, 0.05, 0.1, 0.2, 0.3),
+  max_depth = c(1, 2, 3, 4, 5, 6),
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = 1,
+  subsample = 1
+)
+
+set.seed(25)
+tune_control <- caret::trainControl(
+  method = "repeatedcv", # cross-validation
+  number = 10, # with n folds
+  repeats = 10, #the no. of complete sets of folds to compute
+  #index = createFolds(tr_treated$Id_clean), # fix the folds
+  verboseIter = FALSE, # no training log
+  allowParallel = TRUE, # 
+  savePredictions = TRUE,
+  classProbs = TRUE
+)
+
+set.seed(25)
+xgb_tune_sTI <- caret::train(
+  x = xgb2TI,
+  y = as.factor(labels2TI),
+  trControl = tune_control,
+  tuneGrid = tune_grid,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labelsTI)[[1]]/table(labelsTI)[[2]]
+)
+
+tune_grid2sTI <- expand.grid(
+  nrounds = nrounds,
+  eta = xgb_tune_sTI$bestTune$eta,
+  max_depth = seq(from = 1, to =10, by = 1),
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = c(1,2,3,4,5,6),
+  subsample = 1
+)
+
+set.seed(25)
+xgb_tune2sTI <- caret::train(
+  x = xgb2TI,
+  y = as.factor(labels2TI),
+  trControl = tune_control,
+  tuneGrid = tune_grid2sTI,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labelsTI)[[1]]/table(labelsTI)[[2]]
+)
+
+kable(xgb_tune2sTI$bestTune, caption = "2nd tuning, best parameters")%>% kable_styling(full_width = TRUE)
+
+tune_grid3sTI <- expand.grid(
+  nrounds = nrounds,
+  eta = xgb_tune_sTI$bestTune$eta,
+  max_depth = xgb_tune2sTI$bestTune$max_depth,
+  gamma = 0,
+  colsample_bytree = c(0.4, 0.6, 0.8, 1.0),
+  min_child_weight = xgb_tune2sTI$bestTune$min_child_weight,
+  subsample = c(0.5, 0.75, 1.0)
+)
+
+set.seed(25)
+xgb_tune3sTI <- caret::train(
+  x = xgb2TI,
+  y = as.factor(labels2TI),
+  trControl = tune_control,
+  tuneGrid = tune_grid3sTI,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labelsTI)[[1]]/table(labelsTI)[[2]]
+)
+
+kable(xgb_tune3sTI$bestTune, caption = "3rd tuning, best parameters")%>% kable_styling(full_width = TRUE)
+
+tune_grid4sTI <- expand.grid(
+  nrounds = nrounds,
+  eta = xgb_tune_sTI$bestTune$eta,
+  max_depth = xgb_tune3sTI$bestTune$max_depth,
+  gamma = c(0,0.05, 0.1, 0.5, 0.7, 0.9, 1),
+  colsample_bytree = xgb_tune3sTI$bestTune$colsample_bytree,
+  min_child_weight = xgb_tune2sTI$bestTune$min_child_weight,
+  subsample = xgb_tune3sTI$bestTune$subsample
+)
+
+set.seed(25)
+xgb_tune4sTI <- caret::train(
+  x = xgb2TI,
+  y = as.factor(labels2TI),
+  trControl = tune_control,
+  tuneGrid = tune_grid4sTI,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labelsTI)[[1]]/table(labelsTI)[[2]]
+)
+
+kable(xgb_tune4s$bestTune, caption = "4th tuning, best parameters")%>% kable_styling(full_width = TRUE)
+
+tune_grid5sTI <- expand.grid(
+  nrounds = seq(from = 100, to = 10000, by = 50),
+  eta = c(0.01,0.025,0.05,0.1,0.2,0.3),
+  max_depth = xgb_tune3sTI$bestTune$max_depth,
+  gamma = xgb_tune4sTI$bestTune$gamma,
+  colsample_bytree = xgb_tune3sTI$bestTune$colsample_bytree,
+  min_child_weight = xgb_tune2sTI$bestTune$min_child_weight,
+  subsample = xgb_tune3sTI$bestTune$subsample
+)
+
+set.seed(25)
+xgb_tune5sTI <- caret::train(
+  x = xgb2TI,
+  y = as.factor(labels2TI),
+  trControl = tune_control,
+  tuneGrid = tune_grid5sTI,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labelsTI)[[1]]/table(labelsTI)[[2]]
+)
+```
+
+```{r}
+final_grid_sTI <- expand.grid(
+  nrounds = xgb_tune5sTI$bestTune$nrounds,
+  eta = xgb_tune5sTI$bestTune$eta,
+  max_depth = xgb_tune5sTI$bestTune$max_depth,
+  gamma = xgb_tune5sTI$bestTune$gamma,
+  colsample_bytree = xgb_tune5sTI$bestTune$colsample_bytree,
+  min_child_weight = xgb_tune5sTI$bestTune$min_child_weight,
+  subsample = xgb_tune5sTI$bestTune$subsample
+)
+
+set.seed(25)
+xgb_tune_final_sTI <- caret::train(
+  x = xgb2TI,
+  y = as.factor(labels2TI),
+  trControl = tune_control,
+  tuneGrid = final_grid_sTI,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labelsTI)[[1]]/table(labelsTI)[[2]]
+)
+```
+
+```{r}
+kable(xgb_tune_final_sTI$bestTune, caption = "Final tuning, best parameters")%>% kable_styling(full_width = TRUE)
+```
+
+# CV ROCs for Discovery + Interim
+
+## Boruta
+
+```{r, message=FALSE, warning = FALSE}
+repeatX<- c(1:100)
+boruta.split.DI<- split(fit.Boruta.DI$pred, fit.Boruta.DI$pred$Resample)
+lapply(repeatX, function(d) {
+  pROC::auc(pROC::roc(predictor = boruta.split.DI[[d]]$target, response = boruta.split.DI[[d]]$obs))[1]
+}) %>% unlist() %>% hist(main = paste("Boruta CV mean AUC:", round(mean(.),2), "(SD:", round(sd(.),2), ")"))
+
+```
+
+## Rpart
+
+```{r, warning=FALSE, message=FALSE}
+rpart.split.DI<- split(fit.caret.rpart.DI$pred, fit.caret.rpart.DI$pred$Resample)
+lapply(repeatX, function(d) {
+  pROC::auc(pROC::roc(predictor = rpart.split.DI[[d]]$target, response = rpart.split.DI[[d]]$obs))[1]
+}) %>% unlist() %>% hist(main = paste("Rpart CV mean AUC:", round(mean(.),2),  "(SD:", round(sd(.),2), ")"))
+```
+
+## LASSO (caret model - lambda min)
+
+```{r, warning = FALSE, message=FALSE}
+LASSO.split.min.DI<- split(LASSO.min.DI$pred, LASSO.min.DI$pred$Resample)
+lapply(repeatX, function(d) {
+  pROC::auc(pROC::roc(predictor = LASSO.split.min.DI[[d]]$target, response = LASSO.split.min.DI[[d]]$obs))[1]
+}) %>% unlist() %>% hist(main = paste("LASSO CV mean AUC:", round(mean(.),2), "(SD:", round(sd(.),2), ")"))
+
+```
+
+## LASSO (caret model - lambda 1se)
+
+```{r, warning = FALSE, message=FALSE}
+LASSO.split.1se.DI<- split(LASSO.1se.DI$pred, LASSO.1se.DI$pred$Resample)
+lapply(repeatX, function(d) {
+  pROC::auc(pROC::roc(predictor = LASSO.split.1se.DI[[d]]$target, response = LASSO.split.1se.DI[[d]]$obs))[1]
+}) %>% unlist() %>% hist(main = paste("LASSO CV mean AUC:", round(mean(.),2),  "(SD:", round(sd(.),2), ")"))
+
+```
+
+## XGBoost
+
+```{r, warning = FALSE, message=FALSE}
+tosplitTI<- xgb_tune_final_sTI
+XGB.splitTI<- split(tosplitTI$pred, tosplitTI$pred$Resample)
+parallel::mclapply(repeatX, function(d) {
+  pROC::auc(pROC::roc(predictor = XGB.splitTI[[d]]$target, response = XGB.splitTI[[d]]$obs))[1]
+}) %>% unlist() %>% hist(main = paste("XGBoost CV mean AUC:", round(mean(.),2),  "(SD:", round(sd(.),2), ")"))
+```
+
+# Discovery + Interim Selected miRs
+
+```{r}
+RFvarsDI<-varImp(fit.Boruta.DI)[[1]]%>% filter(Overall > 0) %>% rownames_to_column() %>% arrange(desc(Overall)) %>% select(miR = rowname, RFIMP = Overall)
+rpartvarsDI<- varImp(fit.caret.rpart.DI)[[1]] %>% filter(Overall > 0) %>% rownames_to_column() %>% arrange(desc(Overall)) %>% select(miR = rowname, rpartIMP = Overall) 
+LASSOminvarsDI<- varImp(LASSO.min.DI)[[1]]  %>% filter(Overall > 0)%>% rownames_to_column() %>% arrange(desc(Overall)) %>% select(miR = rowname, LASSOminIMP = Overall)
+LASSO1sevarsDI<- varImp(LASSO.1se.DI)[[1]]  %>% filter(Overall > 0) %>% rownames_to_column() %>% arrange(desc(Overall)) %>% select(miR = rowname, LASSO1seIMP = Overall)
+XGBvarsDI<- varImp(xgb_tune_final_sTI)[[1]]%>% filter(Overall > 0) %>% rownames_to_column() %>% arrange(desc(Overall)) %>% select(miR = rowname, XGBIMP = Overall)
+allimpsDI <- dplyr::full_join(x = RFvarsDI, y=  rpartvarsDI) %>% full_join(x=., y=LASSOminvarsDI) %>% full_join(x=., XGBvarsDI)
+
+kable(RFvarsDI, caption = paste("RF miRNAs (", length(RFvarsDI$miR), ")"))
+kable(rpartvarsDI, caption = paste("Rpart miRs: (",length(rpartvarsDI$miR),")"))
+#kable(lasso.model$rowname[-1], col.names = paste("LASSO miRs: (", length(lasso.model$rowname[-1]),")"))
+kable(LASSOminvarsDI, caption = paste("LASSO min miRs: (", length(LASSOminvarsDI$miR),")"))
+kable(LASSO1sevarsDI, caption = paste("LASSO 1se miRs: (", length(LASSO1sevarsDI$miR),")"))
+kable(XGBvarsDI, caption = paste("XGBoost miRs: (",length(XGBvarsDI$miR),")"))
+```
+
+
+# CVs
+
+```{r}
+separatesplittoconfusion<- function(newlist, splits, d) {
+  newlist[[d]]<- confusionMatrix(splits[[d]]$pred, splits[[d]]$obs, positive = "target")
+}
+
+confusionaccuracy<- function(x){
+  (x$table[1]+x$table[4])/(x$table[1]+x$table[2]+x$table[3]+x$table[4])
+}
+
+```
+
+
+```{r}
+#Training set CV accuracy
+borutaconfusions<- list()
+borutaconfusions<- lapply(repeatX, separatesplittoconfusion, newlist = borutaconfusions, splits = boruta.split)
+rpartconfusions<- list()
+rpartconfusions<- lapply(repeatX, separatesplittoconfusion, newlist = rpartconfusions, splits = rpart.split)
+LASSOminconfusions<- list()
+LASSOminconfusions<- lapply(repeatX, separatesplittoconfusion, newlist = LASSOminconfusions, splits = LASSO.split.min)
+LASSO1seconfusions<- list()
+LASSO1seconfusions<- lapply(repeatX, separatesplittoconfusion, newlist = LASSO1seconfusions, splits = LASSO.split.1se)
+XGBconfusions<- list()
+XGBconfusions<- lapply(repeatX, separatesplittoconfusion, newlist = XGBconfusions, splits = XGB.split)
+
+cvborutaaccuracy<- unlist(lapply(borutaconfusions, confusionaccuracy))
+cvrpartaccuracy<- unlist(lapply(rpartconfusions, confusionaccuracy))
+cvLASSOminaccuracy<- unlist(lapply(LASSOminconfusions, confusionaccuracy))
+cvLASSO1seaccuracy<- unlist(lapply(LASSO1seconfusions, confusionaccuracy))
+cvXGBaccuracy<- unlist(lapply(XGBconfusions, confusionaccuracy))
+  
+borutaCVAUC<- parallel::mclapply(repeatX, function(d) {
+  pROC::auc(pROC::roc(predictor = boruta.split[[d]]$target, response = boruta.split[[d]]$obs))[1]
+}) %>% unlist() %>%mean(.)
+
+rpartCVAUC <- parallel::mclapply(repeatX, function(d) {
+  pROC::auc(pROC::roc(predictor = rpart.split[[d]]$target, response = rpart.split[[d]]$obs))[1]
+}) %>% unlist() %>% mean(.)
+
+LASSOminCVAUC<- parallel::mclapply(repeatX, function(d) {
+  pROC::auc(pROC::roc(predictor = LASSO.split.min[[d]]$target, response = LASSO.split.min[[d]]$obs))[1]
+}) %>% unlist() %>%mean(.)
+
+LASSO1seCVAUC<- parallel::mclapply(repeatX, function(d) {
+  pROC::auc(pROC::roc(predictor = LASSO.split.1se[[d]]$target, response = LASSO.split.1se[[d]]$obs))[1]
+}) %>% unlist() %>% mean(.)
+
+XGBCVAUC<- parallel::mclapply(repeatX, function(d) {
+  pROC::auc(pROC::roc(predictor = XGB.split[[d]]$target, response = XGB.split[[d]]$obs))[1]
+}) %>% unlist() %>% mean(.)
+
+
+#Training + Interim set CV accuracy
+borutaconfusionsDI<- list()
+borutaconfusionsDI<- lapply(repeatX, separatesplittoconfusion, newlist = borutaconfusionsDI, splits = boruta.split.DI)
+rpartconfusionsDI<- list()
+rpartconfusionsDI<- lapply(repeatX, separatesplittoconfusion, newlist = rpartconfusionsDI, splits = rpart.split.DI)
+LASSOminconfusionsDI<- list()
+LASSOminconfusionsDI<- lapply(repeatX, separatesplittoconfusion, newlist = LASSOminconfusionsDI, splits = LASSO.split.min.DI)
+LASSO1seconfusionsDI<- list()
+LASSO1seconfusionsDI<- lapply(repeatX, separatesplittoconfusion, newlist = LASSO1seconfusionsDI, splits = LASSO.split.1se.DI)
+XGBconfusionsDI<- list()
+XGBconfusionsDI<- lapply(repeatX, separatesplittoconfusion, newlist = XGBconfusionsDI, splits = XGB.splitTI)
+
+DIcvborutaaccuracy<- unlist(lapply(borutaconfusionsDI, confusionaccuracy))
+DIcvrpartaccuracy<- unlist(lapply(rpartconfusionsDI, confusionaccuracy))
+DIcvLASSOminaccuracy<- unlist(lapply(LASSOminconfusionsDI, confusionaccuracy))
+DIcvLASSO1seaccuracy<- unlist(lapply(LASSO1seconfusionsDI, confusionaccuracy))
+DIcvXGBaccuracy<- unlist(lapply(XGBconfusionsDI, confusionaccuracy))
+
+
+
+BorutaDICVAUC <- parallel::mclapply(repeatX, function(d) {
+  pROC::auc(pROC::roc(predictor = boruta.split.DI[[d]]$target, response = boruta.split.DI[[d]]$obs))[1]
+}) %>% unlist() %>% mean(.)
+
+rpartDICVAUC<- parallel::mclapply(repeatX, function(d) {
+  pROC::auc(pROC::roc(predictor = rpart.split.DI[[d]]$target, response = rpart.split.DI[[d]]$obs))[1]
+}) %>% unlist() %>%mean(.)
+
+LASSOminDICVAUC<- parallel::mclapply(repeatX, function(d) {
+  pROC::auc(pROC::roc(predictor = LASSO.split.min.DI[[d]]$target, response = LASSO.split.min.DI[[d]]$obs))[1]
+}) %>% unlist() %>% mean(.)
+
+LASSO1seDICVAUC<- parallel::mclapply(repeatX, function(d) {
+  pROC::auc(pROC::roc(predictor = LASSO.split.1se.DI[[d]]$target, response = LASSO.split.1se.DI[[d]]$obs))[1]
+}) %>% unlist() %>% mean(.)
+
+XGBDICVAUC<- parallel::mclapply(repeatX, function(d) {
+  pROC::auc(pROC::roc(predictor = XGB.splitTI[[d]]$target, response = XGB.splitTI[[d]]$obs))[1]
+}) %>% unlist() %>% mean(.)
+
+```
+
+
+```{r}
+#data to export
+export<- as.data.frame(matrix(ncol=0, nrow = 1))
+export$Boruta.CV.accuracy <- summary(cvborutaaccuracy)[[4]]
+export$rpart.CV.accuracy <- summary(cvrpartaccuracy)[[4]]
+export$LASSOmin.CV.accuracy <- summary(cvLASSOminaccuracy)[[4]]
+export$LASSO1se.CV.accuracy <- summary(cvLASSO1seaccuracy)[[4]]
+export$XGB.CV.accuracy <- summary(cvXGBaccuracy)[[4]]
+export$Boruta.CVAUC<- borutaCVAUC
+export$rpart.CVAUC <- rpartCVAUC
+export$LASSOmin.CVAUC <- LASSOminCVAUC
+export$LASSO1se.CVAUC <- LASSO1seCVAUC
+export$XGB.CVAUC <- XGBCVAUC
+export$Boruta.Interim.AUC<- Boruta.auc
+export$Rpart.Interim.AUC <- rpart.auc
+export$LASSOmin.Interim.AUC <- LASSO.auc.min
+export$LASSO1se.Interim.AUC <- LASSO.auc.1se
+export$XGB.Interim.AUC <- xgb.auc
+export$Boruta.Interim.accuracy <- BorutaInterim$overall[[1]]
+export$Rpart.Interim.accuracy <- RpartInterim$overall[[1]]
+export$LASSO.min.Interim.accuracy <- LASSOminInterim$overall[[1]]
+export$LASSO.1se.Interim.accuracy <- LASSO1seInterim$overall[[1]]
+export$XGB.Interim.accuracy <- XGBInterim$overall[[1]]
+export$Boruta.DI.CV.accuracy <- summary(DIcvborutaaccuracy)[[4]]
+export$rpart.DI.CV.accuracy <- summary(DIcvrpartaccuracy)[[4]]
+export$LASSOmin.DI.CV.accuracy <- summary(DIcvLASSOminaccuracy)[[4]]
+export$LASSO1se.DI.CV.accuracy <- summary(DIcvLASSO1seaccuracy)[[4]]
+export$XGB.DI.CV.accuracy <- summary(DIcvXGBaccuracy)[[4]]
+export$Boruta.DICVAUC<- BorutaDICVAUC
+export$rpart.DICVAUC <- rpartDICVAUC
+export$LASSOmin.DICVAUC <- LASSOminDICVAUC
+export$LASSO1se.DICVAUC <- LASSO1seDICVAUC
+export$XGB.DICVAUC <- XGBDICVAUC
+export$No.miRs.Boruta <- length(multi.boruta.mirs)
+export$No.miRs.rpart <- length(rpart.vars)
+export$No.miRs.LASSOmin <- length(lasso.model.min$rowname[-1])
+export$No.miRs.LASSO1se <- length(lasso.model.1se$rowname[-1])
+export$No.miRs.XGB <- length(xgbmir)
+export$No.miRs.DI.Boruta <- length(multi.boruta.mirs.DI)
+export$No.miRs.DI.rpart <- length(rpart.vars.DI)
+export$No.miRs.DI.LASSOmin <- length(lasso.model.min.DI$rowname[-1])
+export$No.miRs.DI.LASSO1se <- length(lasso.model.1se.DI$rowname[-1])
+export$No.miRs.DI.XGB <- length(xgbmirTI)
+export$max.D.CVaccuracy <- max(export[c("Boruta.CV.accuracy", "rpart.CV.accuracy", "LASSOmin.CV.accuracy", "LASSO1se.CV.accuracy", "XGB.CV.accuracy")])
+export$max.D.AUC <- max(export[c("Boruta.CVAUC", "rpart.CVAUC", "LASSOmin.CVAUC", "LASSO1se.CVAUC", "XGB.CVAUC")])
+
+export$max.D.CVaccuracy.method <- colnames(export[c("Boruta.CV.accuracy", "rpart.CV.accuracy", "LASSOmin.CV.accuracy", "LASSO1se.CV.accuracy", "XGB.CV.accuracy")])[max.col(export[c("Boruta.CV.accuracy", "rpart.CV.accuracy", "LASSOmin.CV.accuracy", "LASSO1se.CV.accuracy", "XGB.CV.accuracy")])] %>% gsub("\\..*","",.)
+
+export$max.D.AUC.method<- colnames(export[,c("Boruta.CVAUC", "rpart.CVAUC", "LASSOmin.CVAUC", "LASSO1se.CVAUC", "XGB.CVAUC")])[max.col(export[,c("Boruta.CVAUC", "rpart.CVAUC", "LASSOmin.CVAUC", "LASSO1se.CVAUC", "XGB.CVAUC")])] %>% gsub("\\..*","",.)
+
+export$max.InterimAUC <- max(export[c("Boruta.Interim.AUC", "Rpart.Interim.AUC", "LASSOmin.Interim.AUC", "LASSO1se.Interim.AUC", "XGB.Interim.AUC")])
+
+export$max.InterimAUC.method <- colnames(export[c("Boruta.Interim.AUC", "Rpart.Interim.AUC", "LASSOmin.Interim.AUC", "LASSO1se.Interim.AUC", "XGB.Interim.AUC")])[max.col(export[c("Boruta.Interim.AUC", "Rpart.Interim.AUC", "LASSOmin.Interim.AUC", "LASSO1se.Interim.AUC", "XGB.Interim.AUC")])] %>% gsub("\\..*","",.)
+
+export$maxCVAUC.method.Interim.AUC<- export[,grepl(export$max.D.AUC.method, colnames(export))] %>% .[,grepl("Interim.AUC", colnames(.))]
+export$maxDIAUC <- max(export[c("Boruta.DICVAUC", "rpart.DICVAUC", "LASSOmin.DICVAUC", "LASSO1se.DICVAUC", "XGB.DICVAUC")])
+```
+
+```{r}
+export$comparison <- "PH vs DC"
+export$maxCVAUC.method.DICVAUC<- export[,grepl(export$max.D.AUC.method, colnames(export))] %>% .[,grepl("DICVAUC", colnames(.))]
+export$CV <- "10 x 10"
+#write_csv(export, "PH1Cluster6A.csv")
+
+```
+
+```{r}
+miRlists<- list(Boruta.miRs = multi.boruta.mirs.DI, rpart.miRs = rpart.vars.DI, LASSOmin.miRs = lasso.model.min.DI$rowname[-1], LASSO1se.miRs = lasso.model.1se.DI$rowname[-1], XGB.miRs = xgbmirTI)
+export$max.D.AUC.method
+tosave <- as.data.frame(miRlists[grepl(export$max.D.AUC.method, names(miRlists))])
+#write_csv(tosave, "PH1Cluster6AmiRs.csv")
+```
+
+
+# Variable Importance Plots
+
+```{r}
+ggplot(RFvarsDI, aes(x=miR, y = RFIMP)) + geom_col(fill = "dark red")  + theme(axis.text.x=element_text(angle=90, vjust=0.5, size = 12), panel.background = element_blank(), panel.grid = element_line(colour="grey")) + labs(x="", y="Random Forest Importance", size=12)
+
+ggplot(rpartvarsDI, aes(x=miR, y = rpartIMP)) + geom_col(fill = "tomato2")  + theme(axis.text.x=element_text(angle=90, vjust=0.5, size = 12), panel.background = element_blank(), panel.grid = element_line(colour="grey")) + labs(x="", y="rpart Importance", size=12)
+
+ggplot(LASSOminvarsDI, aes(x=miR, y = LASSOminIMP)) + geom_col(fill = "midnight blue")  + theme(axis.text.x=element_text(angle=90, vjust=0.5, size = 12), panel.background = element_blank(), panel.grid = element_line(colour="grey")) + labs(x="", y="LASSO (lambda min) Importance", size=12)
+
+ggplot(LASSO1sevarsDI, aes(x=miR, y = LASSO1seIMP)) + geom_col(fill = "light blue")  + theme(axis.text.x=element_text(angle=90, vjust=0.5, size = 12), panel.background = element_blank(), panel.grid = element_line(colour="grey")) + labs(x="", y="LASSO (lambda 1se) Importance", size=12)
+
+ggplot(XGBvarsDI, aes(x=miR, y = XGBIMP)) + geom_col(fill = "cornflower blue")  + theme(axis.text.x=element_text(angle=90, vjust=0.5, size = 12), panel.background = element_blank(), panel.grid = element_line(colour="grey")) + labs(x="", y="XGBoost Importance", size=12)
+```
+
+```{r}
+reshaped<- melt(allimpsDI, id.vars = 1)
+ggplot(reshaped, aes(x=miR, y = value)) + geom_bar(aes(fill=variable),stat="identity",position="dodge")  + theme(axis.text.x=element_text(angle=90, vjust=0.5, size = 12), panel.background = element_blank(), panel.grid = element_line(colour="grey")) + labs(x="", y="Importance", size=12) + scale_fill_brewer(palette = "RdYlBu") 
+
+ggplot(reshaped, aes(x=miR, y = value)) + geom_bar(aes(fill=variable),stat="identity")  + theme(axis.text.x=element_text(angle=90, vjust=0.5, size = 12), panel.background = element_blank(), panel.grid = element_line(colour="grey")) + labs(x="", y="Importance", size=12) +  scale_fill_manual(name = "", labels = c("Random Forest", "rpart", "LASSO.min", "XGBoost"), values = c("dark red", "tomato2", "midnight blue", "cornflowerblue"))
+```
+
+# Validation
+
+## RF
+
+```{r}
+Val.RF<- Validation[,c(colnames(Validation)%in% colnames(Boruta.data.DI))]
+RF.Val.preds <- predict(fit.Boruta.DI, Val.RF, type = "raw")
+RFVal<- confusionMatrix(as.factor(RF.Val.preds), Val.RF$dana, positive = "target")
+RFVal
+```
+
+## rpart
+
+```{r}
+rpart.Val.preds <- predict(fit.caret.rpart.DI, select(Validation, rpartmirsDI), type = "raw")
+rpartVal<- confusionMatrix(as.factor(rpart.Val.preds), Validation$dana, positive = "target")
+rpartVal
+```
+
+## LASSO min
+
+```{r}
+LASSO.min.Val.preds <- predict(LASSO.min.DI, newdata = select(Validation, colnames(LASSO.min.dataDI), -dana))
+LASSO.min.Val <- confusionMatrix(LASSO.min.Val.preds, Validation$dana, positive = "target")
+LASSO.min.Val
+```
+
+## LASSO 1se
+
+```{r}
+LASSO.1se.Val.preds <- predict(LASSO.1se.DI, newdata = select(Validation, colnames(LASSO.1se.dataDI), -dana))
+LASSO.1se.Val <- confusionMatrix(LASSO.1se.Val.preds, Validation$dana, positive = "target")
+LASSO.1se.Val
+```
+
+## XGBoost
+
+```{r}
+Val.XGB<- Validation[,colnames(xgb2TI)]
+XGB.Val.preds<- predict(xgb_tune_final_sTI, Val.XGB)
+XGBVal<- confusionMatrix(XGB.Val.preds, Validation$dana, positive = "target")
+XGBVal
+```
+
+# ROC on Validation set
+
+## Boruta
+
+```{r, message=FALSE}
+Boruta.perfDI<- predict(fit.Boruta.DI, select(Val.RF, -dana), type= "prob")
+Boruta.aucDI<- pROC::auc(predictor = Boruta.perfDI$target, response = Val.RF$dana)
+Boruta.rocV<- pROC::roc(predictor = Boruta.perfDI$target, response = Val.RF$dana)
+plot(pROC::roc(predictor = Boruta.perfDI$target, response = Val.RF$dana), main = paste("AUC:", round(Boruta.aucDI,2)))
+```
+
+## Rpart
+
+```{r, message=FALSE}
+rpart.perfDI<- predict(fit.caret.rpart.DI, select(Validation, rpartmirsDI, -dana), type= "prob")
+rpart.aucDI<- pROC::auc(predictor = rpart.perfDI$target, response = Validation$dana)
+rpart.rocV<- pROC::roc(predictor = rpart.perfDI$target, response = Validation$dana)
+plot(pROC::roc(predictor = rpart.perfDI$target, response = Validation$dana), main = paste("AUC:", round(rpart.aucDI,2)))
+```
+
+## LASSO lambda min
+
+```{r, message=FALSE}
+LASSO.probs.minDI <- predict(LASSO.min.DI, newdata=select(Validation, colnames(LASSO.min.dataDI), -dana), type = "prob")
+LASSO.auc.minDI<- pROC::auc(predictor = LASSO.probs.minDI$target, response = Validation$dana)
+LASSO.roc.minV<- pROC::roc(predictor = LASSO.probs.minDI$target, response = Validation$dana)
+plot(pROC::roc(predictor = LASSO.probs.minDI$target, response = Validation$dana), main = paste("AUC:", round(LASSO.auc.minDI,2)))
+```
+
+## LASSO lambda 1se
+
+```{r, message=FALSE}
+LASSO.probs.1seDI <- predict(LASSO.1se.DI, select(Validation, colnames(LASSO.1se.dataDI), -dana), type = "prob")
+LASSO.auc.1seDI<- pROC::auc(predictor = LASSO.probs.1seDI$target, response = Validation$dana)
+LASSO.roc.1seV<- pROC::roc(predictor = LASSO.probs.1seDI$target, response = Validation$dana)
+plot(pROC::roc(predictor = LASSO.probs.1seDI$target, response = Validation$dana), main = paste("AUC:", round(LASSO.auc.1seDI,2)))
+```
+
+## XGBoost
+
+```{r, message=FALSE}
+xgbpredsDI<- predict(xgb_tune_final_sTI, Val.XGB, type = "prob")
+xgb.aucDI<- pROC::auc(predictor = xgbpredsDI$target, response = Validation$dana)
+xgb.rocV<- pROC::roc(predictor = xgbpredsDI$target, response = Validation$dana)
+plot(pROC::roc(predictor = xgbpredsDI$target, response = Validation$dana), main = paste("AUC:", round(xgb.aucDI,2)))
+```
+
+
+# NTproBNP
+
+```{r, message = FALSE, warning=FALSE}
+TrainNtprobnp <- all[all$PARTITION != "VALIDATION",] %>% select(SampleID, dana, ntprobnp) %>% left_join(., select(pheno, SampleID, age), by = "SampleID") %>% mutate(NTproBNPThreshold = case_when(age < 75 & ntprobnp < log2(125) ~ "Below", age < 75 & ntprobnp >= log2(125) ~ "Above", age >= 75 & ntprobnp < log2(450) ~ "Below", age >= 75 & ntprobnp >= log2(450) ~"Above"))
+
+Valntprobnp <- all[all$PARTITION == "VALIDATION",] %>% select(SampleID, dana, ntprobnp) %>% left_join(., select(pheno, SampleID, age), by = "SampleID") %>% mutate(NTproBNPThreshold = case_when(age < 75 & ntprobnp < log2(125) ~ "Below", age < 75 & ntprobnp >= log2(125) ~ "Above", age >= 75 & ntprobnp < log2(450) ~ "Below", age >= 75 & ntprobnp >= log2(450) ~"Above"))
+
+NThighT <- TrainNtprobnp %>% filter(NTproBNPThreshold == "Above")
+NTlowT <- TrainNtprobnp %>% filter(NTproBNPThreshold == "Below")
+TrainNtprobnp <- TrainNtprobnp %>% select(SampleID, dana, ntprobnp)
+NThighV <- Valntprobnp %>% filter(NTproBNPThreshold == "Above" )
+NTlowV <- Valntprobnp %>% filter(NTproBNPThreshold == "Below" )
+Valntprobnp <- Valntprobnp %>%  select(SampleID, dana, ntprobnp)
+
+
+ntprobnpalone<- caret::train(dana ~ ., data = select(TrainNtprobnp, -SampleID), method = "glm", trControl = control, family = 'binomial', weights = model_weights)
+
+ntprobnpdi <- predict(ntprobnpalone, type = "prob")
+ntprobnp.aucDI<- pROC::auc(predictor = ntprobnpdi$target, response = TrainNtprobnp$dana)
+plot(pROC::roc(predictor = ntprobnpdi$target, response = TrainNtprobnp$dana), main = paste("D+I AUC:", round(ntprobnp.aucDI,2)))
+pROC::ci.auc(predictor = ntprobnpdi$target, response = TrainNtprobnp$dana)
+
+Valntprobnppreds<- predict(ntprobnpalone, newdata = Valntprobnp, type = "prob")
+ntprobnp.aucV<- pROC::auc(predictor = Valntprobnppreds$target, response = Valntprobnp$dana)
+NTproBNP.rocV <- pROC::roc(predictor = Valntprobnppreds$target, response = Valntprobnp$dana)
+plot(NTproBNP.rocV, main = paste("Validation dataset AUC:", round(ntprobnp.aucV,2)))
+pROC::ci.auc(predictor = Valntprobnppreds$target, response = Valntprobnp$dana)
+
+ValntprobnppredsAbove<- predict(ntprobnpalone, newdata = NThighV, type = "prob")
+ntprobnp.aucVAbove<- pROC::auc(predictor = ValntprobnppredsAbove$target, response = NThighV$dana)
+NTproBNP.rocVAbove <- pROC::roc(predictor = ValntprobnppredsAbove$target, response = NThighV$dana)
+plot(NTproBNP.rocVAbove, main = paste("Validation dataset AUC above NTproBNP Threshold:", round(ntprobnp.aucVAbove,2)))
+pROC::ci.auc(predictor = ValntprobnppredsAbove$target, response = NThighV$dana)
+
+ValntprobnppredsBelow<- predict(ntprobnpalone, newdata = NTlowV, type = "prob")
+ntprobnp.aucVBelow<- pROC::auc(predictor = ValntprobnppredsBelow$target, response = NTlowV$dana)
+NTproBNP.rocVBelow <- pROC::roc(predictor = ValntprobnppredsBelow$target, response = NTlowV$dana)
+plot(NTproBNP.rocVBelow, main = paste("Validation dataset AUC below NTproBNP Threshold:", round(ntprobnp.aucVBelow,2)))
+pROC::ci.auc(predictor = ValntprobnppredsBelow$target, response = NTlowV$dana)
+
+ntprobnpalone.split.min.DI<- split(ntprobnpalone$pred, ntprobnpalone$pred$Resample)
+lapply(repeatX, function(d) {
+  pROC::auc(pROC::roc(predictor = ntprobnpalone.split.min.DI[[d]]$target, response = ntprobnpalone.split.min.DI[[d]]$obs))[1]
+}) %>% unlist() %>% hist(main = paste("NT-proBNP alone CV mean AUC:", round(mean(.),2), "(SD:", round(sd(.),2), ")"))
+
+NT <- all[all$PARTITION != "VALIDATION",] %>% select(SampleID, dana)  %>% mutate(rowIndex = as.numeric(row.names(.)))
+NTproBNPpredsN <- ntprobnpalone$pred %>% arrange(rowIndex) %>% mutate(timev = rep(seq(1,10),length(rowIndex)/10)) %>% left_join(., select(NT, SampleID, rowIndex), by = "rowIndex")
+
+NTproBNPpredsN <- NTproBNPpredsN  %>% left_join(., select(pheno, SampleID, age, ntprobnp), by = "SampleID")   %>% mutate(NTproBNPThreshold = case_when(age < 75 & ntprobnp < log2(125) ~ "Below", age < 75 & ntprobnp >= log2(125) ~ "Above", age >= 75 & ntprobnp < log2(450) ~ "Below", age >= 75 & ntprobnp >= log2(450) ~"Above"))
+  
+NTproBNPpredsNa <- filter(NTproBNPpredsN, NTproBNPThreshold == "Above")
+NTproBNPpredsNb <- filter(NTproBNPpredsN, NTproBNPThreshold == "Below")
+
+NTproBNPpredsNa.split<- split(NTproBNPpredsNa, NTproBNPpredsNa$Resample)
+parallel::mclapply(repeatX, function(d) {
+  pROC::auc(pROC::roc(predictor = NTproBNPpredsNa.split[[d]]$target, response = NTproBNPpredsNa.split[[d]]$obs))[1]
+}) %>% unlist() %>%  hist(main = paste("NT-proBNP above threshold CV mean AUC:", round(mean(.),2),  "(SD:", round(sd(.),2), ")"))
+
+NTproBNPpredsNsb.split<- split(NTproBNPpredsNb, NTproBNPpredsNb$Resample)
+a<- parallel::mclapply(repeatX, function(d) {
+  pROC::auc(pROC::roc(predictor = NTproBNPpredsNsb.split[[d]]$target, response = NTproBNPpredsNsb.split[[d]]$obs))[1]
+})
+b<- as.numeric(a)
+hist(b, main = paste("NT-proBNP below threshold CV mean AUC:", round(mean(b, na.rm = TRUE),2),  "(SD:", round(sd(b, na.rm = TRUE),2), ")"))
+```
+
+
+# ROC on Validation set, patients above/below NT-proBNP threshold (log2(450))
+
+```{r}
+Val <-all[all$PARTITION == "VALIDATION",] %>% select(-PARTITION)
+Val <- Val %>% mutate(NTproBNPThreshold = ifelse(ntprobnp > log2(450), "Above", "Below"))
+Valabove <- filter(Val, NTproBNPThreshold == "Above")
+Valbelow <- filter(Val, NTproBNPThreshold == "Below")
+```
+
+## RF
+
+```{r, message=FALSE}
+RF.perfV.above<- predict(fit.Boruta.DI, select(Valabove, colnames(Val.RF), -dana), type= "prob")
+RF.aucV.above<- pROC::auc(predictor = RF.perfV.above$target, response = Valabove$dana)
+RF.above<- pROC::roc(predictor = RF.perfV.above$target, response = Valabove$dana)
+
+RF.perfV.below<- predict(fit.Boruta.DI, select(Valbelow, colnames(Val.RF), -dana), type= "prob")
+RF.aucV.below<- pROC::auc(predictor = RF.perfV.below$target, response = Valbelow$dana)
+RF.below<- pROC::roc(predictor = RF.perfV.below$target, response = Valbelow$dana)
+
+paste("Above threshold AUC:", round(RF.aucV.above, 4))
+paste("Below threshold AUC:", round(RF.aucV.below, 4))
+paste("No threshold AUC:", round(Boruta.aucDI, 4))
+
+roc.list.RF <- list("RF, above NT-proBNP Threshold" = RF.above, "RF, below NT-proBNP Threshold" = RF.below, "RF, no Threshold" = Boruta.rocV)
+
+pROC::ggroc(roc.list.RF, aes = "color") + scale_color_manual(values = c("deeppink","midnight blue", "cornflowerblue")) + theme(text = element_text(size = 14), panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))  +  guides(fill=guide_legend(title=""))  + labs(color = "")
+```
+
+## Rpart
+
+```{r, message=FALSE}
+rpart.perfV.above<- predict(fit.caret.rpart.DI, select(Valabove, rpartmirsDI, -dana), type= "prob")
+rpart.aucV.above<- pROC::auc(predictor = rpart.perfV.above$target, response = Valabove$dana)
+rpart.above<- pROC::roc(predictor = rpart.perfV.above$target, response = Valabove$dana)
+
+rpart.perfV.below<- predict(fit.caret.rpart.DI, select(Valbelow, rpartmirsDI, -dana), type= "prob")
+rpart.aucV.below<- pROC::auc(predictor = rpart.perfV.below$target, response = Valbelow$dana)
+rpart.below<- pROC::roc(predictor = rpart.perfV.below$target, response = Valbelow$dana)
+
+paste("Above threshold AUC:", round(rpart.aucV.above, 4))
+paste("Below threshold AUC:", round(rpart.aucV.below, 4))
+paste("No threshold AUC:", round(rpart.aucDI, 4))
+
+roc.list.rpart <- list("Rpart, above NT-proBNP Threshold" = rpart.above, "Rpart, below NT-proBNP Threshold" = rpart.below, "Rpart, no Threshold" = rpart.rocV)
+
+pROC::ggroc(roc.list.rpart, aes = "color") + scale_color_manual(values = c("deeppink","midnight blue", "cornflowerblue")) + theme(text = element_text(size = 14), panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))  +  guides(fill=guide_legend(title=""))  + labs(color = "")
+```
+
+## LASSO lambda min
+
+```{r, message=FALSE}
+LASSOmin.perfV.above<- predict(LASSO.min.DI, select(Valabove, colnames(LASSO.min.dataDI), -dana), type= "prob")
+LASSOmin.aucV.above<- pROC::auc(predictor = LASSOmin.perfV.above$target, response = Valabove$dana)
+LASSOmin.above<- pROC::roc(predictor = LASSOmin.perfV.above$target, response = Valabove$dana)
+
+LASSOmin.perfV.below<- predict(LASSO.min.DI, select(Valbelow, colnames(LASSO.min.dataDI), -dana), type= "prob")
+LASSOmin.aucV.below<- pROC::auc(predictor = LASSOmin.perfV.below$target, response = Valbelow$dana)
+LASSOmin.below<- pROC::roc(predictor = LASSOmin.perfV.below$target, response = Valbelow$dana)
+
+paste("Above threshold AUC:", round(LASSOmin.aucV.above, 4))
+paste("Below threshold AUC:", round(LASSOmin.aucV.below, 4))
+paste("No threshold AUC:", round(LASSO.auc.minDI, 4))
+
+roc.list.LASSOmin <- list("LASSOmin, above NT-proBNP Threshold" = LASSOmin.above, "LASSOmin, below NT-proBNP Threshold" = LASSOmin.below, "LASSOmin, no Threshold" = LASSO.roc.minV)
+
+pROC::ggroc(roc.list.LASSOmin, aes = "color") + scale_color_manual(values = c("deeppink","midnight blue", "cornflowerblue")) + theme(text = element_text(size = 14), panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))  +  guides(fill=guide_legend(title=""))  + labs(color = "")
+```
+
+## LASSO lambda 1se
+
+```{r, message=FALSE}
+LASSO1se.perfV.above<- predict(LASSO.1se.DI, select(Valabove, colnames(LASSO.1se.dataDI), -dana), type= "prob")
+LASSO1se.aucV.above<- pROC::auc(predictor = LASSO1se.perfV.above$target, response = Valabove$dana)
+LASSO1se.above<- pROC::roc(predictor = LASSO1se.perfV.above$target, response = Valabove$dana)
+
+LASSO1se.perfV.below<- predict(LASSO.1se.DI, select(Valbelow, colnames(LASSO.1se.dataDI), -dana), type= "prob")
+LASSO1se.aucV.below<- pROC::auc(predictor = LASSO1se.perfV.below$target, response = Valbelow$dana)
+LASSO1se.below<- pROC::roc(predictor = LASSO1se.perfV.below$target, response = Valbelow$dana)
+
+paste("Above threshold AUC:", round(LASSO1se.aucV.above, 4))
+paste("Below threshold AUC:", round(LASSO1se.aucV.below, 4))
+paste("No threshold AUC:", round(LASSO.auc.1seDI, 4))
+
+roc.list.LASSO1se <- list("LASSO1se, above NT-proBNP Threshold" = LASSO1se.above, "LASSO1se, below NT-proBNP Threshold" = LASSO1se.below, "LASSO1se, no Threshold" = LASSO.roc.1seV)
+
+pROC::ggroc(roc.list.LASSO1se, aes = "color") + scale_color_manual(values = c("deeppink","midnight blue", "cornflowerblue")) + theme(text = element_text(size = 14), panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))  +  guides(fill=guide_legend(title=""))  + labs(color = "")
+```
+
+## XGBoost
+
+```{r, message=FALSE}
+XGB.perfV.above<- predict(xgb_tune_final_sTI, select(Valabove, colnames(xgb2TI), -dana), type= "prob")
+XGB.aucV.above<- pROC::auc(predictor = XGB.perfV.above$target, response = Valabove$dana)
+XGB.above<- pROC::roc(predictor = XGB.perfV.above$target, response = Valabove$dana)
+
+XGB.perfV.below<- predict(xgb_tune_final_sTI, select(Valbelow, colnames(xgb2TI), -dana), type= "prob")
+XGB.aucV.below<- pROC::auc(predictor = XGB.perfV.below$target, response = Valbelow$dana)
+XGB.below<- pROC::roc(predictor = XGB.perfV.below$target, response = Valbelow$dana)
+
+paste("Above threshold AUC:", round(XGB.aucV.above, 4))
+paste("Below threshold AUC:", round(XGB.aucV.below, 4))
+paste("No threshold AUC:", round(xgb.aucDI, 4))
+
+roc.list.XGB <- list("XGB, above NT-proBNP Threshold" = XGB.above, "XGB, below NT-proBNP Threshold" = XGB.below, "XGB, no Threshold" = xgb.rocV)
+
+pROC::ggroc(roc.list.XGB, aes = "color") + scale_color_manual(values = c("deeppink","midnight blue", "cornflowerblue")) + theme(text = element_text(size = 14), panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))  +  guides(fill=guide_legend(title=""))  + labs(color = "")
+
+roc.list.XGB <- list("NT-proBNP > 450pg/mL" = XGB.above, "NT-proBNP < 450pg/mL" = XGB.below, "no Threshold" = xgb.rocV, "NT-proBNP alone" = NTproBNP.rocV)
+
+pROC::ggroc(roc.list.XGB, aes = c("linetype","color")) + scale_color_manual(values = c("deeppink","midnight blue", "cornflowerblue",  "darksalmon")) + scale_linetype_manual(values = c("solid", "solid", "solid", "dashed")) + theme(text = element_text(size = 14), panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))  +  guides(fill=guide_legend(title=""))  + labs(color = "") + ggtitle("PH vs DC - XGBoost model") + guides(linetype = "none")
+
+
+```
+
+## CV AUC for above / below NT-proBNP threshold (Training + Interim)
+
+```{r, message=FALSE, warning = FALSE}
+all$rowIndex <- as.numeric(rownames(all))
+CV_RF <- fit.Boruta.DI$pred %>% arrange(rowIndex) %>% mutate(timev = rep(seq(1,10),length(rowIndex)/10)) %>% left_join(., select(all, SampleID, rowIndex, ntprobnp), by = "rowIndex")
+
+CV_RFA <- filter(CV_RF, ntprobnp > log2(450))
+CV_RFB <- filter(CV_RF, ntprobnp < log2(450))
+
+paste("RF CV AUC above NT-proBNP threshold", pROC::auc(pROC::roc(predictor = CV_RFA$target, response = CV_RFA$obs)))
+paste("RF CV AUC below NT-proBNP threshold", pROC::auc(pROC::roc(predictor = CV_RFB$target, response = CV_RFB$obs)))
+
+CV_rpart <- fit.caret.rpart.DI$pred %>% arrange(rowIndex) %>% mutate(timev = rep(seq(1,10),length(rowIndex)/10)) %>% left_join(., select(all, SampleID, rowIndex, ntprobnp), by = "rowIndex")
+
+CV_rpartA <- filter(CV_rpart, ntprobnp > log2(450))
+CV_rpartB <- filter(CV_rpart, ntprobnp < log2(450))
+
+paste("rpart CV AUC above NT-proBNP threshold", pROC::auc(pROC::roc(predictor = CV_rpartA$target, response = CV_rpartA$obs)))
+paste("rpart CV AUC below NT-proBNP threshold", pROC::auc(pROC::roc(predictor = CV_rpartB$target, response = CV_rpartB$obs)))
+
+CV_LASSOmin <- LASSO.min.DI$pred %>% arrange(rowIndex) %>% mutate(timev = rep(seq(1,10),length(rowIndex)/10)) %>% left_join(., select(all, SampleID, rowIndex, ntprobnp), by = "rowIndex")
+
+CV_LASSOminA <- filter(CV_LASSOmin, ntprobnp > log2(450))
+CV_LASSOminB <- filter(CV_LASSOmin, ntprobnp < log2(450))
+
+paste("LASSO min AUC above NT-proBNP threshold", pROC::auc(pROC::roc(predictor = CV_LASSOminA$target, response = CV_LASSOminA$obs)))
+paste("LASSO min AUC below NT-proBNP threshold", pROC::auc(pROC::roc(predictor = CV_LASSOminB$target, response = CV_LASSOminB$obs)))
+
+CV_XGBDIpreds <- tosplitTI$pred %>% arrange(rowIndex) %>% mutate(timev = rep(seq(1,10),length(rowIndex)/10)) %>% left_join(., select(all, SampleID, rowIndex, ntprobnp), by = "rowIndex")
+  
+CV_XGBDIpredsA <- filter(CV_XGBDIpreds, ntprobnp > log2(450))
+CV_XGBDIpredsB <- filter(CV_XGBDIpreds, ntprobnp < log2(450))
+
+paste("XGB AUC above NT-proBNP threshold", pROC::auc(pROC::roc(predictor = CV_XGBDIpredsA$target, response = CV_XGBDIpredsA$obs)))
+paste("XGB AUC below NT-proBNP threshold", pROC::auc(pROC::roc(predictor = CV_XGBDIpredsB$target, response = CV_XGBDIpredsB$obs)))
+```
+
+# ROC on Validation set, patients above/below NT-proBNP threshold, age dependent (75)
+
+```{r}
+Val2 <- left_join(Val, select(pheno, SampleID, age), by = "SampleID") %>% mutate(NTproBNPThreshold = case_when(age < 75 & ntprobnp < log2(125) ~ "Below", age < 75 & ntprobnp >= log2(125) ~ "Above", age >= 75 & ntprobnp < log2(450) ~ "Below", age >= 75 & ntprobnp >= log2(450) ~"Above"))
+
+Valabove <- filter(Val2, NTproBNPThreshold == "Above")
+Valbelow <- filter(Val2, NTproBNPThreshold == "Below")
+```
+
+## RF
+
+```{r, message=FALSE}
+RF.perfV.above<- predict(fit.Boruta.DI, select(Valabove, colnames(Val.RF), -dana), type= "prob")
+RF.aucV.above<- pROC::auc(predictor = RF.perfV.above$target, response = Valabove$dana)
+RF.above<- pROC::roc(predictor = RF.perfV.above$target, response = Valabove$dana)
+
+RF.perfV.below<- predict(fit.Boruta.DI, select(Valbelow, colnames(Val.RF), -dana), type= "prob")
+RF.aucV.below<- pROC::auc(predictor = RF.perfV.below$target, response = Valbelow$dana)
+RF.below<- pROC::roc(predictor = RF.perfV.below$target, response = Valbelow$dana)
+
+paste("Above threshold AUC:", round(RF.aucV.above, 4))
+paste("Below threshold AUC:", round(RF.aucV.below, 4))
+paste("No threshold AUC:", round(Boruta.aucDI, 4))
+
+roc.list.RF <- list("RF, above NT-proBNP Threshold" = RF.above, "RF, below NT-proBNP Threshold" = RF.below, "RF, no Threshold" = Boruta.rocV)
+
+pROC::ggroc(roc.list.RF, aes = "color") + scale_color_manual(values = c("deeppink","midnight blue", "cornflowerblue")) + theme(text = element_text(size = 14), panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))  +  guides(fill=guide_legend(title=""))  + labs(color = "")
+```
+
+## Rpart
+
+```{r, message=FALSE}
+rpart.perfV.above<- predict(fit.caret.rpart.DI, select(Valabove, rpartmirsDI, -dana), type= "prob")
+rpart.aucV.above<- pROC::auc(predictor = rpart.perfV.above$target, response = Valabove$dana)
+rpart.above<- pROC::roc(predictor = rpart.perfV.above$target, response = Valabove$dana)
+
+rpart.perfV.below<- predict(fit.caret.rpart.DI, select(Valbelow, rpartmirsDI, -dana), type= "prob")
+rpart.aucV.below<- pROC::auc(predictor = rpart.perfV.below$target, response = Valbelow$dana)
+rpart.below<- pROC::roc(predictor = rpart.perfV.below$target, response = Valbelow$dana)
+
+paste("Above threshold AUC:", round(rpart.aucV.above, 4))
+paste("Below threshold AUC:", round(rpart.aucV.below, 4))
+paste("No threshold AUC:", round(rpart.aucDI, 4))
+
+roc.list.rpart <- list("Rpart, above NT-proBNP Threshold" = rpart.above, "Rpart, below NT-proBNP Threshold" = rpart.below, "Rpart, no Threshold" = rpart.rocV)
+
+pROC::ggroc(roc.list.rpart, aes = "color") + scale_color_manual(values = c("deeppink","midnight blue", "cornflowerblue")) + theme(text = element_text(size = 14), panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))  +  guides(fill=guide_legend(title=""))  + labs(color = "")
+```
+
+## LASSO lambda min
+
+```{r, message=FALSE}
+LASSOmin.perfV.above<- predict(LASSO.min.DI, select(Valabove, colnames(LASSO.min.dataDI), -dana), type= "prob")
+LASSOmin.aucV.above<- pROC::auc(predictor = LASSOmin.perfV.above$target, response = Valabove$dana)
+LASSOmin.above<- pROC::roc(predictor = LASSOmin.perfV.above$target, response = Valabove$dana)
+
+LASSOmin.perfV.below<- predict(LASSO.min.DI, select(Valbelow, colnames(LASSO.min.dataDI), -dana), type= "prob")
+LASSOmin.aucV.below<- pROC::auc(predictor = LASSOmin.perfV.below$target, response = Valbelow$dana)
+LASSOmin.below<- pROC::roc(predictor = LASSOmin.perfV.below$target, response = Valbelow$dana)
+
+paste("Above threshold AUC:", round(LASSOmin.aucV.above, 4))
+paste("Below threshold AUC:", round(LASSOmin.aucV.below, 4))
+paste("No threshold AUC:", round(LASSO.auc.minDI, 4))
+
+roc.list.LASSOmin <- list("LASSOmin, above NT-proBNP Threshold" = LASSOmin.above, "LASSOmin, below NT-proBNP Threshold" = LASSOmin.below, "LASSOmin, no Threshold" = LASSO.roc.minV)
+
+pROC::ggroc(roc.list.LASSOmin, aes = "color") + scale_color_manual(values = c("deeppink","midnight blue", "cornflowerblue")) + theme(text = element_text(size = 14), panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))  +  guides(fill=guide_legend(title=""))  + labs(color = "")
+```
+
+## LASSO lambda 1se
+
+```{r, message=FALSE}
+LASSO1se.perfV.above<- predict(LASSO.1se.DI, select(Valabove, colnames(LASSO.1se.dataDI), -dana), type= "prob")
+LASSO1se.aucV.above<- pROC::auc(predictor = LASSO1se.perfV.above$target, response = Valabove$dana)
+LASSO1se.above<- pROC::roc(predictor = LASSO1se.perfV.above$target, response = Valabove$dana)
+
+LASSO1se.perfV.below<- predict(LASSO.1se.DI, select(Valbelow, colnames(LASSO.1se.dataDI), -dana), type= "prob")
+LASSO1se.aucV.below<- pROC::auc(predictor = LASSO1se.perfV.below$target, response = Valbelow$dana)
+LASSO1se.below<- pROC::roc(predictor = LASSO1se.perfV.below$target, response = Valbelow$dana)
+
+paste("Above threshold AUC:", round(LASSO1se.aucV.above, 4))
+paste("Below threshold AUC:", round(LASSO1se.aucV.below, 4))
+paste("No threshold AUC:", round(LASSO.auc.1seDI, 4))
+
+roc.list.LASSO1se <- list("LASSO1se, above NT-proBNP Threshold" = LASSO1se.above, "LASSO1se, below NT-proBNP Threshold" = LASSO1se.below, "LASSO1se, no Threshold" = LASSO.roc.1seV)
+
+pROC::ggroc(roc.list.LASSO1se, aes = "color") + scale_color_manual(values = c("deeppink","midnight blue", "cornflowerblue")) + theme(text = element_text(size = 14), panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))  +  guides(fill=guide_legend(title=""))  + labs(color = "")
+```
+
+## XGBoost
+
+```{r, message=FALSE}
+XGB.perfV.above<- predict(xgb_tune_final_sTI, select(Valabove, colnames(xgb2TI), -dana), type= "prob")
+XGB.aucV.above<- pROC::auc(predictor = XGB.perfV.above$target, response = Valabove$dana)
+XGB.above<- pROC::roc(predictor = XGB.perfV.above$target, response = Valabove$dana)
+
+XGB.perfV.below<- predict(xgb_tune_final_sTI, select(Valbelow, colnames(xgb2TI), -dana), type= "prob")
+XGB.aucV.below<- pROC::auc(predictor = XGB.perfV.below$target, response = Valbelow$dana)
+XGB.below<- pROC::roc(predictor = XGB.perfV.below$target, response = Valbelow$dana)
+
+paste("Above threshold AUC:", round(XGB.aucV.above, 4))
+paste("Below threshold AUC:", round(XGB.aucV.below, 4))
+paste("No threshold AUC:", round(xgb.aucDI, 4))
+
+roc.list.XGB <- list("XGB, above NT-proBNP Threshold" = XGB.above, "XGB, below NT-proBNP Threshold" = XGB.below, "XGB, no Threshold" = xgb.rocV)
+
+pROC::ggroc(roc.list.XGB, aes = "color") + scale_color_manual(values = c("deeppink","midnight blue", "cornflowerblue")) + theme(text = element_text(size = 14), panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))  +  guides(fill=guide_legend(title=""))  + labs(color = "")
+
+roc.list.XGB <- list("Above threshold" = XGB.above, "Below threshold" = XGB.below, "no threshold" = xgb.rocV, "NT-proBNP alone" = NTproBNP.rocV)
+
+pROC::ggroc(roc.list.XGB, aes = c("linetype","color")) + scale_color_manual(values = c("deeppink","midnight blue", "cornflowerblue",  "darksalmon")) + scale_linetype_manual(values = c("solid", "solid", "solid", "dashed")) + theme(text = element_text(size = 14), panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))  +  guides(fill=guide_legend(title=""))  + labs(color = "") + ggtitle("PH vs DC") + guides(linetype = "none")
+
+```
+
+
+```{r}
+ValntprobnppredsBelow<- predict(ntprobnpalone, newdata = NTlowV, type = "response")
+ntprobnp.aucVBelow<- pROC::auc(predictor = ValntprobnppredsBelow, response = NTlowV$dana)
+NTproBNP.rocVBelow <- pROC::roc(predictor = ValntprobnppredsBelow, response = NTlowV$dana)
+plot(NTproBNP.rocVBelow, main = paste("Validation dataset AUC below NTproBNP Threshold:", round(ntprobnp.aucVBelow,2)))
+pROC::ci.auc(predictor = ValntprobnppredsBelow, response = NTlowV$dana)
+```
+
+## CV AUC for above / below NT-proBNP threshold (Training + Interim)
+
+```{r, message=FALSE, warning = FALSE}
+all$rowIndex <- as.numeric(rownames(all))
+CV_RF <-  CV_RF %>% left_join(., select(pheno, SampleID, age), by = "SampleID")  %>% mutate(NTproBNPThreshold = case_when(age < 75 & ntprobnp < log2(125) ~ "Below", age < 75 & ntprobnp >= log2(125) ~ "Above", age >= 75 & ntprobnp < log2(450) ~ "Below", age >= 75 & ntprobnp >= log2(450) ~"Above"))
+
+CV_RFa <- filter(CV_RF, NTproBNPThreshold == "Above")
+CV_RFb <- filter(CV_RF, NTproBNPThreshold == "Below")
+
+paste("RF CV AUC above NT-proBNP /age threshold", pROC::auc(pROC::roc(predictor = CV_RFa$target, response = CV_RFa$obs)))
+paste("RF CV AUC below NT-proBNP /age threshold", pROC::auc(pROC::roc(predictor = CV_RFb$target, response = CV_RFb$obs)))
+
+CV_rpart <-  CV_rpart %>% left_join(., select(pheno, SampleID, age), by = "SampleID")   %>% mutate(NTproBNPThreshold = case_when(age < 75 & ntprobnp < log2(125) ~ "Below", age < 75 & ntprobnp >= log2(125) ~ "Above", age >= 75 & ntprobnp < log2(450) ~ "Below", age >= 75 & ntprobnp >= log2(450) ~"Above"))
+
+CV_rparta <- filter(CV_rpart, NTproBNPThreshold == "Above")
+CV_rpartb <- filter(CV_rpart, NTproBNPThreshold == "Below")
+
+paste("rpart CV AUC above NT-proBNP/age threshold", pROC::auc(pROC::roc(predictor = CV_rparta$target, response = CV_rparta$obs)))
+paste("rpart CV AUC below NT-proBNP/age threshold", pROC::auc(pROC::roc(predictor = CV_rpartb$target, response = CV_rpartb$obs)))
+
+CV_LASSOmin <- CV_LASSOmin %>% left_join(., select(pheno, SampleID, age), by = "SampleID")   %>% mutate(NTproBNPThreshold = case_when(age < 75 & ntprobnp < log2(125) ~ "Below", age < 75 & ntprobnp >= log2(125) ~ "Above", age >= 75 & ntprobnp < log2(450) ~ "Below", age >= 75 & ntprobnp >= log2(450) ~"Above"))
+
+CV_LASSOmina <- filter(CV_LASSOmin, NTproBNPThreshold == "Above")
+CV_LASSOminb <- filter(CV_LASSOmin, NTproBNPThreshold == "Below")
+
+paste("LASSO min AUC above NT-proBNP/age threshold", pROC::auc(pROC::roc(predictor = CV_LASSOmina$target, response = CV_LASSOmina$obs)))
+paste("LASSO min AUC below NT-proBNP/age threshold", pROC::auc(pROC::roc(predictor = CV_LASSOminb$target, response = CV_LASSOminb$obs)))
+
+CV_XGBDIpreds <- CV_XGBDIpreds  %>% left_join(., select(pheno, SampleID, age), by = "SampleID")   %>% mutate(NTproBNPThreshold = case_when(age < 75 & ntprobnp < log2(125) ~ "Below", age < 75 & ntprobnp >= log2(125) ~ "Above", age >= 75 & ntprobnp < log2(450) ~ "Below", age >= 75 & ntprobnp >= log2(450) ~"Above"))
+  
+CV_XGBDIpredsa <- filter(CV_XGBDIpreds, NTproBNPThreshold == "Above")
+CV_XGBDIpredsb <- filter(CV_XGBDIpreds, NTproBNPThreshold == "Below")
+
+CV_XGBDIpredsa.split<- split(CV_XGBDIpredsa, CV_XGBDIpredsa$Resample)
+parallel::mclapply(repeatX, function(d) {
+  pROC::auc(pROC::roc(predictor = CV_XGBDIpredsa.split[[d]]$target, response = CV_XGBDIpredsa.split[[d]]$obs))[1]
+}) %>% unlist() %>% hist(., main = paste("XGBoost above threshold CV mean AUC:", round(mean(.),2),  "(SD:", round(sd(.),2), ")"))
+
+CV_XGBDIpredsb.split<- split(CV_XGBDIpredsb, CV_XGBDIpredsb$Resample)
+parallel::mclapply(repeatX, function(d) {
+  pROC::auc(pROC::roc(predictor = CV_XGBDIpredsb.split[[d]]$target, response = CV_XGBDIpredsb.split[[d]]$obs))[1]
+}) %>% unlist() %>%  hist(., main = paste("XGBoost below threshold CV mean AUC:", round(mean(.),2),  "(SD:", round(sd(.),2), ")"))
+
+paste("XGB AUC above NT-proBNP/age threshold", pROC::auc(pROC::roc(predictor = CV_XGBDIpredsa$target, response = CV_XGBDIpredsa$obs)))
+paste("XGB AUC below NT-proBNP/age threshold", pROC::auc(pROC::roc(predictor = CV_XGBDIpredsb$target, response = CV_XGBDIpredsb$obs)))
+```
+
+
+# Add NT-proBNP to XGB model
+
+```{r}
+Combined <- all[all$PARTITION != "VALIDATION",] %>% select(-PARTITION)
+Validation <-all[all$PARTITION == "VALIDATION",] %>% select(-PARTITION)
+
+NTxgb2TI<- select(Combined, c("dana", all_of(xgbmirTI), "ntprobnp"))
+labels2TI<- NTxgb2TI$dana
+NTxgb2TI<-  NTxgb2TI %>% select(-dana) %>% as.matrix(.)
+
+#Set up XGBoost with default hyperparameters
+
+train_control <- caret::trainControl(
+  method = "none",
+  verboseIter = FALSE, # no training log
+  allowParallel = TRUE # FALSE for reproducible results 
+)
+
+xgb_base_sTI<- caret::train( 
+  x = NTxgb2TI,
+  y = as.factor(labels2TI),
+  trControl = train_control,
+  tuneGrid = grid_default,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labels2TI)[[1]]/table(labels2TI)[[2]]
+  )
+
+nrounds<- seq(from = 100, to =1000, by = 50)
+#tune using caret
+tune_grid <- expand.grid(
+  #nrounds = seq(from = 100, to = 1000, by = 20),
+  nrounds = nrounds,
+  eta = c(0.025, 0.05, 0.1, 0.2, 0.3),
+  max_depth = c(1, 2, 3, 4, 5, 6),
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = 1,
+  subsample = 1
+)
+
+set.seed(25)
+tune_control <- caret::trainControl(
+  method = "repeatedcv", # cross-validation
+  number = 10, # with n folds
+  repeats = 10, #the no. of complete sets of folds to compute
+  #index = createFolds(tr_treated$Id_clean), # fix the folds
+  verboseIter = FALSE, # no training log
+  allowParallel = TRUE, # 
+  savePredictions = TRUE,
+  classProbs = TRUE
+)
+
+set.seed(25)
+NTxgb_tune_sTI <- caret::train(
+  x = NTxgb2TI,
+  y = as.factor(labels2TI),
+  trControl = tune_control,
+  tuneGrid = tune_grid,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labels2TI)[[1]]/table(labels2TI)[[2]]
+)
+
+kable(NTxgb_tune_sTI$bestTune, caption = "1st tuning, best parameters")%>% kable_styling(full_width = TRUE)
+
+NTtune_grid2sTI <- expand.grid(
+  nrounds = nrounds,
+  eta = NTxgb_tune_sTI$bestTune$eta,
+  max_depth = seq(from = 1, to =10, by = 1),
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = c(1,2,3,4,5,6),
+  subsample = 1
+)
+
+set.seed(25)
+NTxgb_tune2sTI <- caret::train(
+  x = NTxgb2TI,
+  y = as.factor(labels2TI),
+  trControl = tune_control,
+  tuneGrid = NTtune_grid2sTI,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labels2TI)[[1]]/table(labels2TI)[[2]]
+)
+
+kable(NTxgb_tune2sTI$bestTune, caption = "2nd tuning, best parameters")%>% kable_styling(full_width = TRUE)
+
+NTtune_grid3sTI <- expand.grid(
+  nrounds = nrounds,
+  eta = NTxgb_tune_sTI$bestTune$eta,
+  max_depth = NTxgb_tune2sTI$bestTune$max_depth,
+  gamma = 0,
+  colsample_bytree = c(0.4, 0.6, 0.8, 1.0),
+  min_child_weight = NTxgb_tune2sTI$bestTune$min_child_weight,
+  subsample = c(0.5, 0.75, 1.0)
+)
+
+set.seed(25)
+NTxgb_tune3sTI <- caret::train(
+  x = NTxgb2TI,
+  y = as.factor(labels2TI),
+  trControl = tune_control,
+  tuneGrid = NTtune_grid3sTI,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labels2TI)[[1]]/table(labels2TI)[[2]]
+)
+
+kable(NTxgb_tune3sTI$bestTune, caption = "3rd tuning, best parameters")%>% kable_styling(full_width = TRUE)
+
+NTtune_grid4sTI <- expand.grid(
+  nrounds = nrounds,
+  eta = NTxgb_tune_sTI$bestTune$eta,
+  max_depth = NTxgb_tune3sTI$bestTune$max_depth,
+  gamma = c(0,0.05, 0.1, 0.5, 0.7, 0.9, 1),
+  colsample_bytree = NTxgb_tune3sTI$bestTune$colsample_bytree,
+  min_child_weight = NTxgb_tune2sTI$bestTune$min_child_weight,
+  subsample = NTxgb_tune3sTI$bestTune$subsample
+)
+```
+
+```{r}
+set.seed(25)
+NTxgb_tune4sTI <- caret::train(
+  x = NTxgb2TI,
+  y = as.factor(labels2TI),
+  trControl = tune_control,
+  tuneGrid = NTtune_grid4sTI,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labels2TI)[[1]]/table(labels2TI)[[2]]
+)
+
+kable(NTxgb_tune4sTI$bestTune, caption = "4th tuning, best parameters")%>% kable_styling(full_width = TRUE)
+
+NTtune_grid5sTI <- expand.grid(
+  nrounds = seq(from = 100, to = 10000, by = 50),
+  eta = c(0.01,0.025,0.05,0.1,0.2,0.3),
+  max_depth = NTxgb_tune3sTI$bestTune$max_depth,
+  gamma = NTxgb_tune4sTI$bestTune$gamma,
+  colsample_bytree = NTxgb_tune3sTI$bestTune$colsample_bytree,
+  min_child_weight = NTxgb_tune2sTI$bestTune$min_child_weight,
+  subsample = NTxgb_tune3sTI$bestTune$subsample
+)
+
+set.seed(25)
+NTxgb_tune5sTI <- caret::train(
+  x = NTxgb2TI,
+  y = as.factor(labels2TI),
+  trControl = tune_control,
+  tuneGrid = NTtune_grid5sTI,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labels2TI)[[1]]/table(labels2TI)[[2]]
+)
+
+kable(NTxgb_tune5sTI$bestTune, caption = "5th tuning, best parameters")%>% kable_styling(full_width = TRUE)
+
+```
+
+```{r}
+NTfinal_grid_sTI <- expand.grid(
+  nrounds = NTxgb_tune5sTI$bestTune$nrounds,
+  eta = NTxgb_tune5sTI$bestTune$eta,
+  max_depth = NTxgb_tune5sTI$bestTune$max_depth,
+  gamma = NTxgb_tune5sTI$bestTune$gamma,
+  colsample_bytree = NTxgb_tune5sTI$bestTune$colsample_bytree,
+  min_child_weight = NTxgb_tune5sTI$bestTune$min_child_weight,
+  subsample = NTxgb_tune5sTI$bestTune$subsample
+)
+
+set.seed(25)
+NTxgb_tune_final_sTI <- caret::train(
+  x = NTxgb2TI,
+  y = as.factor(labels2TI),
+  trControl = tune_control,
+  tuneGrid = final_grid_sTI,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labels2TI)[[1]]/table(labels2TI)[[2]]
+)
+```
+
+```{r}
+kable(NTxgb_tune_final_sTI$bestTune, caption = "Final tuning, best parameters")%>% kable_styling(full_width = TRUE)
+```
+
+
+```{r}
+tosplitNTproBNP<- NTxgb_tune_final_sTI
+XGB.splitNTproBNP<- split(tosplitNTproBNP$pred, tosplitNTproBNP$pred$Resample)
+parallel::mclapply(repeatX, function(d) {
+  pROC::auc(pROC::roc(predictor = XGB.splitNTproBNP[[d]]$target, response = XGB.splitNTproBNP[[d]]$obs))[1]
+}) %>% unlist() %>% hist(main = paste("XGBoost CV mean AUC:", round(mean(.),2)))
+
+
+CV_XGBDIpredsN <- tosplitNTproBNP$pred %>% arrange(rowIndex) %>% mutate(timev = rep(seq(1,10),length(rowIndex)/10)) %>% left_join(., select(Combined, SampleID, rowIndex, ntprobnp), by = "rowIndex")
+  
+CV_XGBDIpredsAN <- filter(CV_XGBDIpredsN, ntprobnp > log2(450))
+CV_XGBDIpredsBN <- filter(CV_XGBDIpredsN, ntprobnp < log2(450))
+
+paste("XGB (including NT-proBNP) CV AUC above NT-proBNP threshold", pROC::auc(pROC::roc(predictor = CV_XGBDIpredsAN$target, response = CV_XGBDIpredsAN$obs)))
+paste("XGB (including NT-proBNP) CV AUC below NT-proBNP threshold", pROC::auc(pROC::roc(predictor = CV_XGBDIpredsBN$target, response = CV_XGBDIpredsBN$obs)))
+
+
+Val.XGBN<- Validation[,c(colnames(xgb2TI), "ntprobnp")]
+
+xgbpredsDIN<- predict(NTxgb_tune_final_sTI, Val.XGBN, type = "prob")
+xgb.aucDIN<- pROC::auc(predictor = xgbpredsDIN$target, response = Validation$dana)
+xgb.rocVN<- pROC::roc(predictor = xgbpredsDIN$target, response = Validation$dana)
+plot(xgb.rocVN, main = paste("AUC:", round(xgb.aucDIN,2)))
+```
+
+
+
+```{r, include=FALSE}
+XGBDIpreds2N <- tosplitNTproBNP$pred %>% arrange(rowIndex) %>% mutate(timev = rep(seq(1,10),length(tosplitNTproBNP$pred$rowIndex)/10)) %>% select(rowIndex, pred, obs, target, timev)
+#roc2 <- pROC::roc(predictor = XGBDIpreds2N$target, response = XGBDIpreds2$obs)
+#thresh <- pROC::coords(roc2, "best", "threshold")
+XGBDIpreds2N <- XGBDIpreds2N %>% reshape(idvar = c("rowIndex", "obs"), timevar = "timev", direction = "wide")  %>% left_join(., select(Combined, rowIndex, SampleID), by = "rowIndex") 
+XGBDIpreds2N %>% write_csv(., "Predictions/PHvsDC2withNTproBNP.csv")
+
+xgbpredsDIN$dana <- Validation$dana
+xgbpredsDIN$SampleID <- Validation$SampleID
+write_csv(xgbpredsDIN, "Predictions/validationpredsPHvsDCwithNTproBNP.csv")
+```
+
+# Fold predicitions
+
+```{r, message=FALSE, warning = FALSE}
+RFDIpreds <- fit.Boruta.DI$pred %>% arrange(rowIndex) %>% mutate(timev = rep(seq(1,10),length(fit.Boruta.DI$pred$rowIndex)/10)) %>% select(rowIndex, pred, obs, timev) %>% mutate(RF = case_when(obs == "Cont" & pred == "Cont" ~ "TN", obs == "Cont" & pred == "target" ~ "FP", obs == "target" & pred == "Cont" ~ "FN", obs == "target" & pred == "target" ~ "TP")) %>% reshape(idvar = "rowIndex", timevar = "timev", direction = "wide")
+RFDIpreds <- select(RFDIpreds, rowIndex, observed = obs.1, grep("^pred.", colnames(RFDIpreds)), grep("^RF", colnames(RFDIpreds)))
+
+rpartDIpreds <- fit.caret.rpart.DI$pred %>% arrange(rowIndex) %>% mutate(timev = rep(seq(1,10),length(fit.caret.rpart.DI$pred$rowIndex)/10)) %>% select(rowIndex, pred, obs, timev)   %>% mutate(rpart = case_when(obs == "Cont" & pred == "Cont" ~ "TN", obs == "Cont" & pred == "target" ~ "FP", obs == "target" & pred == "Cont" ~ "FN", obs == "target" & pred == "target" ~ "TP")) %>% reshape(idvar = "rowIndex", timevar = "timev", direction = "wide")
+rpartDIpreds <- select(rpartDIpreds, rowIndex, obs.1, grep("^pred.", colnames(rpartDIpreds)), grep("^rpart", colnames(rpartDIpreds))) 
+
+
+LASSO1seDIpreds <- LASSO.1se.DI$pred %>% arrange(rowIndex) %>% mutate(timev = rep(seq(1,10),length(LASSO.1se.DI$pred$rowIndex)/10)) %>% select(rowIndex, pred, obs, timev)  %>% mutate(LASSO1se = case_when(obs == "Cont" & pred == "Cont" ~ "TN", obs == "Cont" & pred == "target" ~ "FP", obs == "target" & pred == "Cont" ~ "FN", obs == "target" & pred == "target" ~ "TP")) %>% reshape(idvar = "rowIndex", timevar = "timev", direction = "wide")
+LASSO1seDIpreds   <- select(LASSO1seDIpreds  , rowIndex, obs.1, grep("^pred.", colnames(LASSO1seDIpreds)), grep("^LASSO1se", colnames(LASSO1seDIpreds))) 
+
+XGBDIpreds <- tosplitTI$pred %>% arrange(rowIndex) %>% mutate(timev = rep(seq(1,10),length(tosplitTI$pred$rowIndex)/10)) %>% select(rowIndex, pred, obs, timev)  %>% mutate(XGB = case_when(obs == "Cont" & pred == "Cont" ~ "TN", obs == "Cont" & pred == "target" ~ "FP", obs == "target" & pred == "Cont" ~ "FN", obs == "target" & pred == "target" ~ "TP")) %>% reshape(idvar = "rowIndex", timevar = "timev", direction = "wide")
+XGBDIpreds <- select(XGBDIpreds, rowIndex, obs.1, grep("^pred.", colnames(XGBDIpreds)), grep("^XGB", colnames(XGBDIpreds))) 
+
+allpreds <- left_join(select(RFDIpreds, rowIndex, observed, grep("^pred.", colnames(RFDIpreds))), select(rpartDIpreds, rowIndex, grep("^pred.", colnames(rpartDIpreds))), by = "rowIndex") %>% left_join(., select(LASSO1seDIpreds, rowIndex, grep("^pred.", colnames(LASSO1seDIpreds))), by = "rowIndex") %>% left_join(., select(XGBDIpreds, rowIndex, grep("^pred.", colnames(XGBDIpreds))), by = "rowIndex")
+
+recodedpreds <- left_join(select(RFDIpreds, observed, rowIndex, grep("^RF.", colnames(RFDIpreds))), select(rpartDIpreds, rowIndex, grep("^rpart.", colnames(rpartDIpreds))), by = "rowIndex") %>% left_join(., select(LASSO1seDIpreds, rowIndex, grep("^LASSO", colnames(LASSO1seDIpreds))), by = "rowIndex")%>% left_join(., select(XGBDIpreds, rowIndex, grep("^XGB", colnames(XGBDIpreds))), by = "rowIndex")
+
+plotdata <- recodedpreds %>% arrange(observed)  %>% mutate(rowIndex = as.numeric(row.names(.))) %>% melt(., id.vars = "rowIndex") 
+
+ggplot(plotdata, aes(variable, rowIndex)) + geom_tile(aes(fill = value)) + scale_fill_manual(values=c("red", "blue", "black")) + scale_fill_manual(values = c("tomato2","midnight blue", "red", "cornflowerblue", "grey", "grey")) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+#add PH status
+PHstatus <- left_join(select(pheno, SampleID, dana1, ntprobnp, PARTITION), new, by = "SampleID") %>% filter(PARTITION != "VALIDATION") %>% select(SampleID, dana1) %>% mutate(rowIndex = as.numeric(row.names(.)))
+
+plotdetail <- left_join(select(PHstatus, SampleID, dana1, rowIndex), recodedpreds)  %>% select(-observed) %>% rowwise() %>% mutate(FPFN = sum(str_count(c_across(where(is.character)), "F"))) %>% ungroup()
+
+missclasses<- left_join(select(plotdetail, SampleID, FPFN), pheno, by = "SampleID") %>% mutate(FPFNbinary = ifelse(FPFN > 20, "High missclassified %", "Low misclassified %"))
+
+plotdetail_more <- left_join(plotdetail, select(pheno, SampleID, treated), by = "SampleID") %>% mutate(FPFNbinary = ifelse(FPFN > 20, "High missclassified %", "Low misclassified %")) %>% arrange(dana1, FPFNbinary, treated) %>% select(-SampleID, -FPFN)  %>% mutate(rowIndex = as.numeric(row.names(.))) %>% melt(., id.vars = "rowIndex") %>% mutate(type = case_when(variable == "dana1" ~ "WHO classification", variable == "FPFNbinary" ~ "Misclassification", variable == "treated" ~ "Treatment status", TRUE ~ "" )) 
+plotdetail_more$type_f <- factor(plotdetail_more$type, levels = c("WHO classification", "", "Misclassification",  "Treatment status"))
+
+ggplot(plotdetail_more, aes(variable, rowIndex)) + geom_tile(aes(fill = value)) + scale_fill_manual(values=c("red", "blue", "black")) + scale_fill_manual(values = c("grey", "midnight blue", "deeppink", "dark red", "grey", "cornflowerblue", "midnight blue", "darksalmon", "yellow", "deeppink", "white","grey", "grey", "dark red")) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + facet_grid(~type_f, scales= 'free_x', space = 'free_x')
+```
+
+Change threshold for prediction:
+
+```{r, warning=F, message=F}
+RFlistofrocs <- lapply(1:100, function(d) {
+  pROC::roc(predictor = boruta.split.DI[[d]]$target, response = boruta.split.DI[[d]]$obs)
+}) 
+RFthresholds<- lapply(1:100, function(d) {
+  pROC::coords(RFlistofrocs[[d]], "best",  "threshold") }) %>% unlist()
+RFthresholdspecs <- data.frame(threshold = double(), specificity = double(), sensitivity = double())
+for(i in 1:100) {
+ RFthresholdspecs[i,] <- unlist(RFthresholds[i])
+}
+
+paste("RF mean threshold:", mean(RFthresholdspecs$threshold))
+
+rpartlistofrocs <- lapply(1:100, function(d) {
+  pROC::roc(predictor = rpart.split.DI[[d]]$target, response = rpart.split.DI[[d]]$obs)
+}) 
+rpartthresholds<- lapply(1:100, function(d) {
+  pROC::coords(rpartlistofrocs[[d]], "best",  "threshold") }) %>% unlist()
+rpartthresholdspecs <- data.frame(threshold = double(), specificity = double(), sensitivity = double())
+for(i in 1:100) {
+ rpartthresholdspecs[i,] <- unlist(rpartthresholds[i])
+}
+
+paste("rpart mean threshold:", mean(rpartthresholdspecs$threshold))
+
+LASSO1selistofrocs <- lapply(1:100, function(d) {
+  pROC::roc(predictor = LASSO.split.1se.DI[[d]]$target, response = LASSO.split.1se.DI[[d]]$obs)
+}) 
+LASSO1sethresholds<- lapply(1:100, function(d) {
+  pROC::coords(LASSO1selistofrocs[[d]], "best",  "threshold") }) %>% unlist()
+LASSO1sethresholdspecs <- data.frame(threshold = double(), specificity = double(), sensitivity = double())
+for(i in 1:100) {
+ LASSO1sethresholdspecs[i,] <- unlist(LASSO1sethresholds[i])
+}
+
+paste("LASSO 1se mean threshold:", mean(LASSO1sethresholdspecs$threshold))
+
+XGBlistofrocs <- lapply(1:100, function(d) {
+  pROC::roc(predictor = XGB.splitTI[[d]]$target, response = XGB.splitTI[[d]]$obs)
+}) 
+XGBthresholds<- lapply(1:100, function(d) {
+  pROC::coords(XGBlistofrocs[[d]], "best",  "threshold") }) %>% unlist()
+XGBthresholdspecs <- data.frame(threshold = double(), specificity = double(), sensitivity = double())
+for(i in 1:100) {
+ XGBthresholdspecs[i,] <- unlist(XGBthresholds[i])
+}
+
+paste("XGB mean threshold:", mean(XGBthresholdspecs$threshold))
+
+```
+
+
+```{r, message=FALSE, warning = FALSE}
+RFDIpredsThresh <- fit.Boruta.DI$pred %>% arrange(rowIndex) %>% mutate(timev = rep(seq(1,10),length(fit.Boruta.DI$pred$rowIndex)/10)) %>% select(rowIndex, obs, target, timev) %>% mutate(pred.T = ifelse(target > mean(RFthresholdspecs$threshold), "target", "Cont")) %>%  mutate(RF = case_when(obs == "Cont" & pred.T == "Cont" ~ "TN", obs == "Cont" & pred.T == "target" ~ "FP", obs == "target" & pred.T == "Cont" ~ "FN", obs == "target" & pred.T == "target" ~ "TP")) %>% reshape(idvar = "rowIndex", timevar = "timev", direction = "wide")
+RFDIpredsThresh <- select(RFDIpredsThresh, rowIndex, observed = obs.1, grep("^pred.T", colnames(RFDIpredsThresh)), grep("^RF", colnames(RFDIpredsThresh)))
+
+rpartDIpredsThresh <- fit.caret.rpart.DI$pred %>% arrange(rowIndex) %>% mutate(timev = rep(seq(1,10),length(fit.caret.rpart.DI$pred$rowIndex)/10)) %>% select(rowIndex, obs, target, timev) %>% mutate(pred.T = ifelse(target > mean(rpartthresholdspecs$threshold), "target", "Cont")) %>%  mutate(rpart = case_when(obs == "Cont" & pred.T == "Cont" ~ "TN", obs == "Cont" & pred.T == "target" ~ "FP", obs == "target" & pred.T == "Cont" ~ "FN", obs == "target" & pred.T == "target" ~ "TP")) %>% reshape(idvar = "rowIndex", timevar = "timev", direction = "wide")
+rpartDIpredsThresh <- select(rpartDIpredsThresh, rowIndex, obs.1, grep("^pred.T", colnames(rpartDIpredsThresh)), grep("^rpart", colnames(rpartDIpredsThresh))) 
+
+LASSO1seDIpredsThresh <- LASSO.1se.DI$pred %>% arrange(rowIndex) %>% mutate(timev = rep(seq(1,10),length(LASSO.1se.DI$pred$rowIndex)/10)) %>% select(rowIndex, obs, target, timev)  %>% mutate(pred.T = ifelse(target > mean(LASSO1sethresholdspecs$threshold), "target", "Cont")) %>%  mutate(LASSO = case_when(obs == "Cont" & pred.T == "Cont" ~ "TN", obs == "Cont" & pred.T == "target" ~ "FP", obs == "target" & pred.T == "Cont" ~ "FN", obs == "target" & pred.T == "target" ~ "TP")) %>% reshape(idvar = "rowIndex", timevar = "timev", direction = "wide")
+LASSO1seDIpredsThresh   <- select(LASSO1seDIpredsThresh  , rowIndex, obs.1, grep("^pred.T", colnames(LASSO1seDIpredsThresh)), grep("^LASSO", colnames(LASSO1seDIpredsThresh))) 
+
+
+XGBDIpredsThresh <- tosplitTI$pred %>% arrange(rowIndex) %>% mutate(timev = rep(seq(1,10),length(LASSO.1se.DI$pred$rowIndex)/10)) %>% select(rowIndex, obs, target, timev) %>% mutate(pred.T = ifelse(target > mean(XGBthresholdspecs$threshold), "target", "Cont")) %>%  mutate(XGB = case_when(obs == "Cont" & pred.T == "Cont" ~ "TN", obs == "Cont" & pred.T == "target" ~ "FP", obs == "target" & pred.T == "Cont" ~ "FN", obs == "target" & pred.T == "target" ~ "TP")) %>% reshape(idvar = "rowIndex", timevar = "timev", direction = "wide")
+XGBDIpredsThresh <- select(XGBDIpredsThresh, rowIndex, obs.1, grep("^pred.T", colnames(XGBDIpredsThresh)), grep("^XGB", colnames(XGBDIpredsThresh))) 
+
+allpredsThresh <- left_join(select(RFDIpredsThresh, rowIndex, observed, grep("^pred.", colnames(RFDIpredsThresh))), select(rpartDIpredsThresh, rowIndex, grep("^pred.", colnames(rpartDIpredsThresh))), by = "rowIndex") %>% left_join(., select(LASSO1seDIpredsThresh, rowIndex, grep("^pred.", colnames(LASSO1seDIpredsThresh))), by = "rowIndex") %>% left_join(., select(XGBDIpredsThresh, rowIndex, grep("^pred.", colnames(XGBDIpredsThresh))), by = "rowIndex")
+
+recodedpredsThresh <- left_join(select(RFDIpredsThresh, observed, rowIndex, grep("^RF.", colnames(RFDIpredsThresh))), select(rpartDIpredsThresh, rowIndex, grep("^rpart.", colnames(rpartDIpredsThresh))), by = "rowIndex") %>% left_join(., select(LASSO1seDIpredsThresh, rowIndex, grep("^LASSO", colnames(LASSO1seDIpredsThresh))), by = "rowIndex")%>% left_join(., select(XGBDIpredsThresh, rowIndex, grep("^XGB", colnames(XGBDIpredsThresh))), by = "rowIndex")
+
+plotdataThresh <- recodedpredsThresh %>% arrange(observed)  %>% mutate(rowIndex = as.numeric(row.names(.))) %>% melt(., id.vars = "rowIndex") 
+
+ggplot(plotdataThresh, aes(variable, rowIndex)) + geom_tile(aes(fill = value)) + scale_fill_manual(values=c("red", "blue", "black")) + scale_fill_manual(values = c("tomato2","midnight blue", "red", "cornflowerblue", "grey", "grey")) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+#add PH status
+PHstatus <- left_join(select(pheno, SampleID, dana1, ntprobnp, PARTITION), new, by = "SampleID") %>% filter(PARTITION != "VALIDATION") %>% select(SampleID, dana1) %>% mutate(rowIndex = as.numeric(row.names(.)))
+
+plotdetailThresh <- left_join(select(PHstatus, SampleID, dana1, rowIndex), recodedpredsThresh)  %>% select(-observed) %>% rowwise() %>% mutate(FPFN = sum(str_count(c_across(where(is.character)), "F"))) %>% ungroup()
+
+missclassesThresh<- left_join(select(plotdetailThresh, SampleID, FPFN), pheno, by = "SampleID") %>% mutate(FPFNbinary = ifelse(FPFN > 20, "High missclassified %", "Low misclassified %"))
+
+plotdetail_moreThresh <- left_join(plotdetailThresh, select(pheno, SampleID, treated), by = "SampleID") %>% mutate(FPFNbinary = ifelse(FPFN > 20, "High missclassified %", "Low misclassified %")) %>% arrange(dana1, FPFNbinary, treated) %>% select(-SampleID, -FPFN)  %>% mutate(rowIndex = as.numeric(row.names(.))) %>% melt(., id.vars = "rowIndex") %>% mutate(type = case_when(variable == "dana1" ~ "WHO classification", variable == "FPFNbinary" ~ "Misclassification", variable == "treated" ~ "Treatment status", TRUE ~ "" )) 
+plotdetail_moreThresh$type_f <- factor(plotdetail_moreThresh$type, levels = c("WHO classification", "", "Misclassification",  "Treatment status"))
+
+ggplot(plotdetail_moreThresh, aes(variable, rowIndex)) + geom_tile(aes(fill = value)) + scale_fill_manual(values=c("red", "blue", "black")) + scale_fill_manual(values = c("grey", "midnight blue", "deeppink", "dark red", "grey", "cornflowerblue", "midnight blue", "darksalmon", "yellow", "deeppink", "white","grey", "grey", "dark red")) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + facet_grid(~type_f, scales= 'free_x', space = 'free_x')
+```
+
+Threshold for RF & XGB (not rpart or LASSO)
+
+```{r}
+recodedpredsRFXGBThresh <- left_join(select(RFDIpredsThresh, observed, rowIndex, grep("^RF.", colnames(RFDIpredsThresh))), select(rpartDIpreds, rowIndex, grep("^rpart.", colnames(rpartDIpreds))), by = "rowIndex") %>% left_join(., select(LASSO1seDIpreds, rowIndex, grep("^LASSO", colnames(LASSO1seDIpreds))), by = "rowIndex") %>% left_join(., select(XGBDIpredsThresh, rowIndex, grep("^XGB", colnames(XGBDIpredsThresh))), by = "rowIndex")
+
+plotdataRFXGBThresh <- recodedpredsRFXGBThresh %>% arrange(observed)  %>% mutate(rowIndex = as.numeric(row.names(.))) %>% melt(., id.vars = "rowIndex") 
+
+ggplot(plotdataRFXGBThresh, aes(variable, rowIndex)) + geom_tile(aes(fill = value)) + scale_fill_manual(values=c("red", "blue", "black")) + scale_fill_manual(values = c("tomato2","midnight blue", "red", "cornflowerblue", "grey", "grey")) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+#add PH status
+PHstatus <- left_join(select(pheno, SampleID, dana1, ntprobnp, PARTITION), new, by = "SampleID") %>% filter(PARTITION != "VALIDATION") %>% select(SampleID, dana1) %>% mutate(rowIndex = as.numeric(row.names(.)))
+
+plotdetailRFXGBThresh <- left_join(select(PHstatus, SampleID, dana1, rowIndex), recodedpredsRFXGBThresh)  %>% select(-observed) %>% rowwise() %>% mutate(FPFN = sum(str_count(c_across(where(is.character)), "F"))) %>% ungroup()
+
+missclassesRFXGBThresh<- left_join(select(plotdetailRFXGBThresh, SampleID, FPFN), pheno, by = "SampleID") %>% mutate(FPFNbinary = ifelse(FPFN > 20, "High missclassified %", "Low misclassified %"))
+
+plotdetail_moreRFXGBThresh <- left_join(plotdetailRFXGBThresh, select(pheno, SampleID, treated), by = "SampleID") %>% mutate(FPFNbinary = ifelse(FPFN > 20, "High missclassified %", "Low misclassified %")) %>% arrange(dana1, FPFNbinary, treated) %>% select(-SampleID, -FPFN)  %>% mutate(rowIndex = as.numeric(row.names(.))) %>% melt(., id.vars = "rowIndex") %>% mutate(type = case_when(variable == "dana1" ~ "WHO classification", variable == "FPFNbinary" ~ "Misclassification", variable == "treated" ~ "Treatment status", TRUE ~ "" )) 
+plotdetail_moreRFXGBThresh$type_f <- factor(plotdetail_moreRFXGBThresh$type, levels = c("WHO classification", "", "Misclassification",  "Treatment status"))
+
+ggplot(plotdetail_moreRFXGBThresh, aes(variable, rowIndex)) + geom_tile(aes(fill = value)) + scale_fill_manual(values=c("red", "blue", "black")) + scale_fill_manual(values = c("grey", "midnight blue", "deeppink", "dark red", "grey", "cornflowerblue", "midnight blue", "darksalmon", "yellow", "deeppink", "white","grey", "grey", "dark red")) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + facet_grid(~type_f, scales= 'free_x', space = 'free_x')
+
+
+```
+
+Threshold for RF, rpart & XGBoost (not LASSO)
+
+```{r}
+recodedpredsRFrpartXGBThresh <- left_join(select(RFDIpredsThresh, observed, rowIndex, grep("^RF.", colnames(RFDIpredsThresh))), select(rpartDIpredsThresh, rowIndex, grep("^rpart.", colnames(rpartDIpredsThresh))), by = "rowIndex") %>% left_join(., select(LASSO1seDIpreds, rowIndex, grep("^LASSO", colnames(LASSO1seDIpreds))), by = "rowIndex") %>% left_join(., select(XGBDIpredsThresh, rowIndex, grep("^XGB", colnames(XGBDIpredsThresh))), by = "rowIndex")
+
+plotdataRFrpartXGBThresh <- recodedpredsRFrpartXGBThresh %>% arrange(observed)  %>% mutate(rowIndex = as.numeric(row.names(.))) %>% melt(., id.vars = "rowIndex") 
+
+ggplot(plotdataRFrpartXGBThresh, aes(variable, rowIndex)) + geom_tile(aes(fill = value)) + scale_fill_manual(values=c("red", "blue", "black")) + scale_fill_manual(values = c("tomato2","midnight blue", "red", "cornflowerblue", "grey", "grey")) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+plotdetailRFrpartXGBThresh <- left_join(select(PHstatus, SampleID, dana1, rowIndex), recodedpredsRFrpartXGBThresh)  %>% select(-observed) %>% rowwise() %>% mutate(FPFN = sum(str_count(c_across(where(is.character)), "F"))) %>% ungroup()
+
+plotdetail_moreRFrpartXGBThresh <- left_join(plotdetailRFrpartXGBThresh, select(pheno, SampleID, treated), by = "SampleID") %>% mutate(FPFNbinary = ifelse(FPFN > 20, "High missclassified %", "Low misclassified %")) %>% arrange(dana1, FPFNbinary, treated) %>% select(-SampleID, -FPFN)  %>% mutate(rowIndex = as.numeric(row.names(.))) %>% melt(., id.vars = "rowIndex") %>% mutate(type = case_when(variable == "dana1" ~ "WHO classification", variable == "FPFNbinary" ~ "Misclassification", variable == "treated" ~ "Treatment status", TRUE ~ "" )) 
+plotdetail_moreRFrpartXGBThresh$type_f <- factor(plotdetail_moreRFrpartXGBThresh$type, levels = c("WHO classification", "", "Misclassification",  "Treatment status"))
+
+ggplot(plotdetail_moreRFrpartXGBThresh, aes(variable, rowIndex)) + geom_tile(aes(fill = value)) + scale_fill_manual(values=c("red", "blue", "black")) + scale_fill_manual(values = c("grey", "midnight blue", "deeppink", "dark red", "grey", "cornflowerblue", "midnight blue", "darksalmon", "yellow", "deeppink", "white","grey", "grey", "dark red")) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + facet_grid(~type_f, scales= 'free_x', space = 'free_x')
+
+
+```
+
+```{r}
+XGBvarsDI %>% mutate(method = "XGBoost", comparison = "PHvsDC") %>% rename(Importance = XGBIMP) %>% write_csv(., "miRNAs/PHvsDC.csv")
+
+Combined$xgb_tune_final_sTIpreds <- predict(xgb_tune_final_sTI, newdata = xgb2TI)
+Combined$rowIndex <- as.numeric(row.names(Combined))
+XGBDIpreds %>% select(rowIndex, obs.1, grep("^XGB", colnames(XGBDIpreds))) %>% left_join(., select(Combined, rowIndex, SampleID)) %>% write_csv(., "Predictions/PHvsDC.csv")
+xgbpredsDI$dana <- Validation$dana
+xgbpredsDI$SampleID <- Validation$SampleID
+write_csv(xgbpredsDI, "Predictions/validationpredsPHvsDC.csv")
+
+XGBDIpreds2 <- tosplitTI$pred %>% arrange(rowIndex) %>% mutate(timev = rep(seq(1,10),length(tosplitTI$pred$rowIndex)/10)) %>% select(rowIndex, pred, obs, target, timev)
+roc2 <- pROC::roc(predictor = XGBDIpreds2$target, response = XGBDIpreds2$obs)
+thresh <- pROC::coords(roc2, "best", "threshold")
+XGBDIpreds2 <- XGBDIpreds2 %>% mutate(threshpred = ifelse(XGBDIpreds2$target > thresh$threshold, "target", "Cont")) %>% mutate(TPTN = case_when(obs == "Cont" & threshpred == "Cont" ~ "TN", obs == "Cont" & threshpred == "target" ~ "FP", obs == "target" & threshpred == "Cont" ~ "FN", obs == "target" & threshpred == "target" ~ "TP")) %>% select(-pred) %>% reshape(idvar = c("rowIndex", "obs"), timevar = "timev", direction = "wide") %>% left_join(., select(Combined, rowIndex, SampleID)) 
+XGBDIpreds2 %>% write_csv(., "Predictions/PHvsDC2.csv")
+
+```
+
+# Un-processed Validation values
+
+Missing values in miRNAs for RF, rpart & LASSO models
+
+
+## XGBoost
+
+```{r}
+Val.XGB2<- validation_raw[,colnames(xgb2TI)]
+XGB.Val.preds2<- predict(xgb_tune_final_sTI, Val.XGB2)
+XGBVal<- confusionMatrix(XGB.Val.preds2, validation_raw$dana, positive = "target")
+XGBVal
+```
+
+# ROC on un-processed Validation set
+
+## XGBoost
+
+```{r, message=FALSE}
+xgbpredsDI2<- predict(xgb_tune_final_sTI, Val.XGB2, type = "prob")
+xgb.aucDI2<- pROC::auc(predictor = xgbpredsDI2$target, response = validation_raw$dana)
+xgb.rocV2<- pROC::roc(predictor = xgbpredsDI2$target, response = validation_raw$dana)
+pROC::ci.auc(xgb.aucDI2)
+plot(pROC::roc(predictor = xgbpredsDI2$target, response = validation_raw$dana), main = paste("AUC:", round(xgb.aucDI2,2)))
+
+```
+
+## XGBoost above / below NTproBNP age threshold
+
+```{r, message=FALSE}
+Valraw2 <- left_join(validation_raw, select(pheno, SampleID, age, ntprobnp), by = "SampleID") %>% mutate(NTproBNPThreshold = case_when(age < 75 & ntprobnp < log2(125) ~ "Below", age < 75 & ntprobnp >= log2(125) ~ "Above", age >= 75 & ntprobnp < log2(450) ~ "Below", age >= 75 & ntprobnp >= log2(450) ~"Above"))
+
+table(Valraw2$dana, Valraw2$NTproBNPThreshold)
+
+ValaboveRaw <- filter(Valraw2, NTproBNPThreshold == "Above")
+ValbelowRaw <- filter(Valraw2, NTproBNPThreshold == "Below")
+```
+
+```{r}
+XGB.perfV.above.Raw<- predict(xgb_tune_final_sTI, select(ValaboveRaw, colnames(xgb2TI), -dana), type= "prob")
+XGB.aucV.above.Raw<- pROC::auc(predictor = XGB.perfV.above.Raw$target, response = ValaboveRaw$dana)
+XGB.above.Raw<- pROC::roc(predictor = XGB.perfV.above.Raw$target, response = ValaboveRaw$dana)
+
+XGB.perfV.below.Raw<- predict(xgb_tune_final_sTI, select(ValbelowRaw, colnames(xgb2TI), -dana), type= "prob")
+XGB.aucV.below.Raw<- pROC::auc(predictor = XGB.perfV.below.Raw$target, response = ValbelowRaw$dana)
+XGB.below.Raw<- pROC::roc(predictor = XGB.perfV.below.Raw$target, response = ValbelowRaw$dana)
+
+paste("Above threshold AUC:", round(XGB.aucV.above.Raw, 4))
+paste("Below threshold AUC:", round(XGB.aucV.below.Raw, 4))
+paste("No threshold AUC:", round(xgb.aucDI2, 4))
+
+roc.list.XGB <- list("XGB, above NT-proBNP Threshold" = XGB.above.Raw, "XGB, below NT-proBNP Threshold" = XGB.below.Raw, "XGB, no Threshold" = xgb.rocV2)
+
+pROC::ggroc(roc.list.XGB, aes = "color") + scale_color_manual(values = c("deeppink","midnight blue", "cornflowerblue")) + theme(text = element_text(size = 14), panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))  +  guides(fill=guide_legend(title=""))  + labs(color = "")
+
+roc.list.XGB <- list("Above threshold" = XGB.above.Raw, "Below threshold" = XGB.below.Raw, "no threshold" = xgb.rocV2, "NT-proBNP alone" = NTproBNP.rocV)
+
+pROC::ggroc(roc.list.XGB, aes = c("linetype","color")) + scale_color_manual(values = c("deeppink","midnight blue", "cornflowerblue",  "darksalmon")) + scale_linetype_manual(values = c("solid", "solid", "solid", "dashed")) + theme(text = element_text(size = 14), panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))  +  guides(fill=guide_legend(title=""))  + labs(color = "") + ggtitle("PH vs DC - XGBoost model") + guides(linetype = "none")
+
+```
+
+
+
+
+```{r, include=FALSE}
+save.image(file = "PHvsDC.RData") # 
+#when reloading from image file, libraries must be loaded too
+#library(pacman)
+#p_load("kableExtra","caret","tidyverse","reshape2","e1071","JamesTools","OptimalCutpoints","Boruta","ggplot2","randomForest","ROCR","rpart","party","rpart.plot","partykit","glmnet","xgboost","RColorBrewer", "pheatmap")
+load("PHvsDC.RData")
+```
+
+
+# New XGB weights
+
+
+```{r}
+#Set up XGBoost with default hyperparameters
+grid_default <- expand.grid(
+  nrounds = 100,
+  max_depth = 6,
+  eta = 0.3,
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = 1,
+  subsample = 1
+)
+
+train_control <- caret::trainControl(
+  method = "none",
+  verboseIter = FALSE, # no training log
+  allowParallel = TRUE # FALSE for reproducible results 
+)
+
+xgb_baseTI<- caret::train( 
+  x = trainTI,
+  y = as.factor(labelsTI),
+  trControl = train_control,
+  tuneGrid = grid_default,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labelsTI)[[2]]/table(labelsTI)[[1]]
+  )
+
+nrounds<- seq(from = 100, to =1000, by = 50)
+#tune using caret
+tune_gridTI <- expand.grid(
+  #nrounds = seq(from = 100, to = 1000, by = 20),
+  nrounds = nrounds,
+  eta = c(0.025, 0.05, 0.1, 0.2, 0.3),
+  max_depth = c(1, 2, 3, 4, 5, 6),
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = 1,
+  subsample = 1
+)
+
+set.seed(25)
+tune_control <- caret::trainControl(
+  method = "cv", # cross-validation
+  number = 10, # with n folds
+  repeats = 10, #the no. of complete sets of folds to compute
+  #index = createFolds(tr_treated$Id_clean), # fix the folds
+  verboseIter = FALSE, # no training log
+  allowParallel = TRUE # FALSE for reproducible results 
+)
+
+set.seed(25)
+xgb_tuneTI <- caret::train(
+  x = trainTI,
+  y = as.factor(labelsTI),
+  trControl = tune_control,
+  tuneGrid = tune_gridTI,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labelsTI)[[2]]/table(labelsTI)[[1]]
+)
+
+#function to help plot
+tuneplot <- function(x, probs = .90) {
+  ggplot(x) +
+    coord_cartesian(ylim = c(quantile(x$results$Accuracy, probs = probs), min(x$results$Accuracy))) +
+    theme_bw()
+}
+
+kable(xgb_tuneTI$bestTune, caption = "1st tuning, best parameters")%>% kable_styling(full_width = TRUE)
+
+tune_grid2TI <- expand.grid(
+  nrounds = nrounds,
+  eta = xgb_tuneTI$bestTune$eta,
+  max_depth = seq(from = 1, to =10, by = 1),
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = c(1,2,3,4,5,6),
+  subsample = 1
+)
+
+set.seed(25)
+xgb_tune2TI <- caret::train(
+  x = trainTI,
+  y = as.factor(labelsTI),
+  trControl = tune_control,
+  tuneGrid = tune_grid2TI,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labelsTI)[[2]]/table(labelsTI)[[1]]
+)
+
+kable(xgb_tune2TI$bestTune, caption = "2nd tuning, best parameters")%>% kable_styling(full_width = TRUE)
+
+tune_grid3TI <- expand.grid(
+  nrounds = nrounds,
+  eta = xgb_tuneTI$bestTune$eta,
+  max_depth = xgb_tune2TI$bestTune$max_depth,
+  gamma = 0,
+  colsample_bytree = c(0.4, 0.6, 0.8, 1.0),
+  min_child_weight = xgb_tune2TI$bestTune$min_child_weight,
+  subsample = c(0.5, 0.75, 1.0)
+)
+
+set.seed(25)
+xgb_tune3TI <- caret::train(
+  x = trainTI,
+  y = as.factor(labelsTI),
+  trControl = tune_control,
+  tuneGrid = tune_grid3TI,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labelsTI)[[2]]/table(labelsTI)[[1]]
+)
+
+kable(xgb_tune3TI$bestTune, caption = "3rd tuning, best parameters")%>% kable_styling(full_width = TRUE)
+
+tune_grid4TI <- expand.grid(
+  nrounds = nrounds,
+  eta = xgb_tuneTI$bestTune$eta,
+  max_depth = xgb_tune3TI$bestTune$max_depth,
+  gamma = c(0,0.05, 0.1, 0.5, 0.7, 0.9, 1),
+  colsample_bytree = xgb_tune3TI$bestTune$colsample_bytree,
+  min_child_weight = xgb_tune2TI$bestTune$min_child_weight,
+  subsample = xgb_tune3TI$bestTune$subsample
+)
+
+set.seed(25)
+xgb_tune4TI <- caret::train(
+  x = trainTI,
+  y = as.factor(labelsTI),
+  trControl = tune_control,
+  tuneGrid = tune_grid4TI,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labelsTI)[[2]]/table(labelsTI)[[1]]
+)
+
+kable(xgb_tune4TI$bestTune, caption = "4th tuning, best parameters")%>% kable_styling(full_width = TRUE)
+
+tune_grid5TI <- expand.grid(
+  nrounds = seq(from = 100, to = 10000, by = 50),
+  eta = c(0.01,0.025,0.05,0.1,0.2,0.3),
+  max_depth = xgb_tune3TI$bestTune$max_depth,
+  gamma = xgb_tune4TI$bestTune$gamma,
+  colsample_bytree = xgb_tune3TI$bestTune$colsample_bytree,
+  min_child_weight = xgb_tune2TI$bestTune$min_child_weight,
+  subsample = xgb_tune3TI$bestTune$subsample
+)
+
+set.seed(25)
+xgb_tune5TI <- caret::train(
+  x = trainTI,
+  y = as.factor(labelsTI),
+  trControl = tune_control,
+  tuneGrid = tune_grid5TI,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labelsTI)[[2]]/table(labelsTI)[[1]]
+)
+
+final_gridTI <- expand.grid(
+  nrounds = xgb_tune5TI$bestTune$nrounds,
+  eta = xgb_tune5TI$bestTune$eta,
+  max_depth = xgb_tune5TI$bestTune$max_depth,
+  gamma = xgb_tune5TI$bestTune$gamma,
+  colsample_bytree = xgb_tune5TI$bestTune$colsample_bytree,
+  min_child_weight = xgb_tune5TI$bestTune$min_child_weight,
+  subsample = xgb_tune5TI$bestTune$subsample
+)
+
+set.seed(25)
+xgb_tune_finalTI <- caret::train(
+  x = trainTI,
+  y = as.factor(labelsTI),
+  trControl = tune_control,
+  tuneGrid = final_gridTI,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labelsTI)[[2]]/table(labelsTI)[[1]]
+)
+```
+
+```{r}
+kable(xgb_tune_finalTI$bestTune, caption = "Final tuning, best parameters")%>% kable_styling(full_width = TRUE)
+
+xgb_impTI<- varImp(xgb_tune_finalTI, scale = FALSE)
+plot(xgb_impTI)
+```
+
+```{r}
+xgbmirTI<- head(rownames(xgb_impTI$importance), n=10)
+xgb2TI<- select(Combined, c("dana", xgbmirTI))
+labels2TI<- xgb2TI$dana
+xgb2TI<- data.matrix(xgb2TI[-1])
+
+#Set up XGBoost with default hyperparameters
+
+train_control <- caret::trainControl(
+  method = "none",
+  verboseIter = FALSE, # no training log
+  allowParallel = TRUE # FALSE for reproducible results 
+)
+
+xgb_base_sTI<- caret::train( 
+  x = xgb2TI,
+  y = as.factor(labels2TI),
+  trControl = train_control,
+  tuneGrid = grid_default,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labelsTI)[[2]]/table(labelsTI)[[1]]
+  )
+
+nrounds<- seq(from = 100, to =1000, by = 50)
+#tune using caret
+tune_grid <- expand.grid(
+  #nrounds = seq(from = 100, to = 1000, by = 20),
+  nrounds = nrounds,
+  eta = c(0.025, 0.05, 0.1, 0.2, 0.3),
+  max_depth = c(1, 2, 3, 4, 5, 6),
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = 1,
+  subsample = 1
+)
+
+set.seed(25)
+tune_control <- caret::trainControl(
+  method = "repeatedcv", # cross-validation
+  number = 10, # with n folds
+  repeats = 10, #the no. of complete sets of folds to compute
+  #index = createFolds(tr_treated$Id_clean), # fix the folds
+  verboseIter = FALSE, # no training log
+  allowParallel = TRUE, # 
+  savePredictions = TRUE,
+  classProbs = TRUE
+)
+
+set.seed(25)
+xgb_tune_sTI <- caret::train(
+  x = xgb2TI,
+  y = as.factor(labels2TI),
+  trControl = tune_control,
+  tuneGrid = tune_grid,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labelsTI)[[2]]/table(labelsTI)[[1]]
+)
+
+tune_grid2sTI <- expand.grid(
+  nrounds = nrounds,
+  eta = xgb_tune_sTI$bestTune$eta,
+  max_depth = seq(from = 1, to =10, by = 1),
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = c(1,2,3,4,5,6),
+  subsample = 1
+)
+
+set.seed(25)
+xgb_tune2sTI <- caret::train(
+  x = xgb2TI,
+  y = as.factor(labels2TI),
+  trControl = tune_control,
+  tuneGrid = tune_grid2sTI,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labelsTI)[[2]]/table(labelsTI)[[1]]
+)
+
+kable(xgb_tune2sTI$bestTune, caption = "2nd tuning, best parameters")%>% kable_styling(full_width = TRUE)
+
+tune_grid3sTI <- expand.grid(
+  nrounds = nrounds,
+  eta = xgb_tune_sTI$bestTune$eta,
+  max_depth = xgb_tune2sTI$bestTune$max_depth,
+  gamma = 0,
+  colsample_bytree = c(0.4, 0.6, 0.8, 1.0),
+  min_child_weight = xgb_tune2sTI$bestTune$min_child_weight,
+  subsample = c(0.5, 0.75, 1.0)
+)
+
+set.seed(25)
+xgb_tune3sTI <- caret::train(
+  x = xgb2TI,
+  y = as.factor(labels2TI),
+  trControl = tune_control,
+  tuneGrid = tune_grid3sTI,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labelsTI)[[2]]/table(labelsTI)[[1]]
+)
+
+kable(xgb_tune3sTI$bestTune, caption = "3rd tuning, best parameters")%>% kable_styling(full_width = TRUE)
+
+tune_grid4sTI <- expand.grid(
+  nrounds = nrounds,
+  eta = xgb_tune_sTI$bestTune$eta,
+  max_depth = xgb_tune3sTI$bestTune$max_depth,
+  gamma = c(0,0.05, 0.1, 0.5, 0.7, 0.9, 1),
+  colsample_bytree = xgb_tune3sTI$bestTune$colsample_bytree,
+  min_child_weight = xgb_tune2sTI$bestTune$min_child_weight,
+  subsample = xgb_tune3sTI$bestTune$subsample
+)
+
+set.seed(25)
+xgb_tune4sTI <- caret::train(
+  x = xgb2TI,
+  y = as.factor(labels2TI),
+  trControl = tune_control,
+  tuneGrid = tune_grid4sTI,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labelsTI)[[2]]/table(labelsTI)[[1]]
+)
+
+kable(xgb_tune4s$bestTune, caption = "4th tuning, best parameters")%>% kable_styling(full_width = TRUE)
+
+tune_grid5sTI <- expand.grid(
+  nrounds = seq(from = 100, to = 10000, by = 50),
+  eta = c(0.01,0.025,0.05,0.1,0.2,0.3),
+  max_depth = xgb_tune3sTI$bestTune$max_depth,
+  gamma = xgb_tune4sTI$bestTune$gamma,
+  colsample_bytree = xgb_tune3sTI$bestTune$colsample_bytree,
+  min_child_weight = xgb_tune2sTI$bestTune$min_child_weight,
+  subsample = xgb_tune3sTI$bestTune$subsample
+)
+
+set.seed(25)
+xgb_tune5sTI <- caret::train(
+  x = xgb2TI,
+  y = as.factor(labels2TI),
+  trControl = tune_control,
+  tuneGrid = tune_grid5sTI,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labelsTI)[[2]]/table(labelsTI)[[1]]
+)
+```
+
+```{r}
+final_grid_sTI <- expand.grid(
+  nrounds = xgb_tune5sTI$bestTune$nrounds,
+  eta = xgb_tune5sTI$bestTune$eta,
+  max_depth = xgb_tune5sTI$bestTune$max_depth,
+  gamma = xgb_tune5sTI$bestTune$gamma,
+  colsample_bytree = xgb_tune5sTI$bestTune$colsample_bytree,
+  min_child_weight = xgb_tune5sTI$bestTune$min_child_weight,
+  subsample = xgb_tune5sTI$bestTune$subsample
+)
+
+set.seed(25)
+xgb_tune_final_sTI <- caret::train(
+  x = xgb2TI,
+  y = as.factor(labels2TI),
+  trControl = tune_control,
+  tuneGrid = final_grid_sTI,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labelsTI)[[2]]/table(labelsTI)[[1]]
+)
+```
+
+```{r}
+kable(xgb_tune_final_sTI$bestTune, caption = "Final tuning, best parameters")%>% kable_styling(full_width = TRUE)
+```
+
+## CV XGBoost
+
+```{r, warning = FALSE, message=FALSE}
+tosplitTI<- xgb_tune_final_sTI
+XGB.splitTI<- split(tosplitTI$pred, tosplitTI$pred$Resample)
+parallel::mclapply(repeatX, function(d) {
+  pROC::auc(pROC::roc(predictor = XGB.splitTI[[d]]$target, response = XGB.splitTI[[d]]$obs))[1]
+}) %>% unlist() %>% hist(main = paste("XGBoost CV mean AUC:", round(mean(.),2), "(SD:", round(sd(.),2), ")"))
+```
+
+
+
+```{r, eval = F}
+XGBDIpreds <- tosplitTI$pred %>% arrange(rowIndex) %>% mutate(timev = rep(seq(1,10),length(tosplitTI$pred$rowIndex)/10)) %>% select(rowIndex, pred, obs, timev)  %>% mutate(XGB = case_when(obs == "Cont" & pred == "Cont" ~ "TN", obs == "Cont" & pred == "target" ~ "FP", obs == "target" & pred == "Cont" ~ "FN", obs == "target" & pred == "target" ~ "TP")) %>% reshape(idvar = "rowIndex", timevar = "timev", direction = "wide")
+XGBDIpreds <- select(XGBDIpreds, rowIndex, obs.1, grep("^pred.", colnames(XGBDIpreds)), grep("^XGB", colnames(XGBDIpreds))) 
+
+allpreds <- left_join(select(RFDIpreds, rowIndex, observed, grep("^pred.", colnames(RFDIpreds))), select(rpartDIpreds, rowIndex, grep("^pred.", colnames(rpartDIpreds))), by = "rowIndex") %>% left_join(., select(LASSO1seDIpreds, rowIndex, grep("^pred.", colnames(LASSO1seDIpreds))), by = "rowIndex") %>% left_join(., select(XGBDIpreds, rowIndex, grep("^pred.", colnames(XGBDIpreds))), by = "rowIndex")
+
+recodedpreds <- left_join(select(RFDIpreds, observed, rowIndex, grep("^RF.", colnames(RFDIpreds))), select(rpartDIpreds, rowIndex, grep("^rpart.", colnames(rpartDIpreds))), by = "rowIndex") %>% left_join(., select(LASSO1seDIpreds, rowIndex, grep("^LASSO", colnames(LASSO1seDIpreds))), by = "rowIndex")%>% left_join(., select(XGBDIpreds, rowIndex, grep("^XGB", colnames(XGBDIpreds))), by = "rowIndex")
+
+plotdata <- recodedpreds %>% arrange(observed)  %>% mutate(rowIndex = as.numeric(row.names(.))) %>% melt(., id.vars = "rowIndex") 
+
+ggplot(plotdata, aes(variable, rowIndex)) + geom_tile(aes(fill = value)) + scale_fill_manual(values=c("red", "blue", "black")) + scale_fill_manual(values = c("tomato2","midnight blue", "red", "cornflowerblue", "grey", "grey")) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+#add PH status
+PHstatus <- left_join(select(pheno, SampleID, dana1, ntprobnp, PARTITION), new, by = "SampleID") %>% filter(PARTITION != "VALIDATION") %>% select(SampleID, dana1) %>% mutate(rowIndex = as.numeric(row.names(.)))
+
+plotdetail <- left_join(select(PHstatus, SampleID, dana1, rowIndex), recodedpreds)  %>% select(-observed) %>% rowwise() %>% mutate(FPFN = sum(str_count(c_across(where(is.character)), "F"))) %>% ungroup()
+
+missclasses<- left_join(select(plotdetail, SampleID, FPFN), pheno, by = "SampleID") %>% mutate(FPFNbinary = ifelse(FPFN > 20, "High missclassified %", "Low misclassified %"))
+
+plotdetail_more <- left_join(plotdetail, select(pheno, SampleID, site, treated), by = "SampleID") %>% mutate(FPFNbinary = ifelse(FPFN > 20, "High missclassified %", "Low misclassified %")) %>% arrange(dana1, FPFNbinary, site, treated) %>% select(-SampleID, -FPFN)  %>% mutate(rowIndex = as.numeric(row.names(.))) %>% melt(., id.vars = "rowIndex") %>% mutate(type = case_when(variable == "dana1" ~ "WHO classification", variable == "FPFNbinary" ~ "Misclassification", variable == "site" ~ "Site", variable == "treated" ~ "Treatment status", TRUE ~ "" )) 
+plotdetail_more$type_f <- factor(plotdetail_more$type, levels = c("WHO classification", "", "Misclassification", "Site", "Treatment status"))
+
+ggplot(plotdetail_more, aes(variable, rowIndex)) + geom_tile(aes(fill = value)) + scale_fill_manual(values=c("red", "blue", "black")) + scale_fill_manual(values = c("darksalmon", "grey", "midnight blue", "deeppink", "dark red", "yellow", "grey", "darksalmon", "yellow", "cornflowerblue","cornflowerblue", "grey", "grey",  "dark red")) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + facet_grid(~type_f, scales= 'free_x', space = 'free_x')
+```
+
+```{r, eval=FALSE}
+
+XGBlistofrocs <- lapply(1:100, function(d) {
+  pROC::roc(predictor = XGB.splitTI[[d]]$target, response = XGB.splitTI[[d]]$obs)
+}) 
+XGBthresholds<- lapply(1:100, function(d) {
+  pROC::coords(XGBlistofrocs[[d]], "best",  "threshold") }) %>% unlist()
+XGBthresholdspecs <- data.frame(threshold = double(), specificity = double(), sensitivity = double())
+for(i in 1:100) {
+ XGBthresholdspecs[i,] <- unlist(XGBthresholds[i])
+}
+
+paste("XGB mean threshold:", mean(XGBthresholdspecs$threshold))
+
+XGBDIpredsThresh <- tosplitTI$pred %>% arrange(rowIndex) %>% mutate(timev = rep(seq(1,10),length(tosplitTI$pred$rowIndex)/10)) %>% select(rowIndex, obs, target, timev) %>% mutate(pred.T = ifelse(target > mean(XGBthresholdspecs$threshold), "target", "Cont")) %>%  mutate(XGB = case_when(obs == "Cont" & pred.T == "Cont" ~ "TN", obs == "Cont" & pred.T == "target" ~ "FP", obs == "target" & pred.T == "Cont" ~ "FN", obs == "target" & pred.T == "target" ~ "TP")) %>% reshape(idvar = "rowIndex", timevar = "timev", direction = "wide")
+XGBDIpredsThresh <- select(XGBDIpredsThresh, rowIndex, obs.1, grep("^pred.T", colnames(XGBDIpredsThresh)), grep("^XGB", colnames(XGBDIpredsThresh))) 
+
+allpredsThresh <- left_join(select(RFDIpredsThresh, rowIndex, observed, grep("^pred.", colnames(RFDIpredsThresh))), select(rpartDIpredsThresh, rowIndex, grep("^pred.", colnames(rpartDIpredsThresh))), by = "rowIndex") %>% left_join(., select(LASSO1seDIpredsThresh, rowIndex, grep("^pred.", colnames(LASSO1seDIpredsThresh))), by = "rowIndex") %>% left_join(., select(XGBDIpredsThresh, rowIndex, grep("^pred.", colnames(XGBDIpredsThresh))), by = "rowIndex")
+
+recodedpredsThresh <- left_join(select(RFDIpredsThresh, observed, rowIndex, grep("^RF.", colnames(RFDIpredsThresh))), select(rpartDIpredsThresh, rowIndex, grep("^rpart.", colnames(rpartDIpredsThresh))), by = "rowIndex") %>% left_join(., select(LASSO1seDIpredsThresh, rowIndex, grep("^LASSO", colnames(LASSO1seDIpredsThresh))), by = "rowIndex")%>% left_join(., select(XGBDIpredsThresh, rowIndex, grep("^XGB", colnames(XGBDIpredsThresh))), by = "rowIndex")
+
+plotdataThresh <- recodedpredsThresh %>% arrange(observed)  %>% mutate(rowIndex = as.numeric(row.names(.))) %>% melt(., id.vars = "rowIndex") 
+
+ggplot(plotdataThresh, aes(variable, rowIndex)) + geom_tile(aes(fill = value)) + scale_fill_manual(values=c("red", "blue", "black")) + scale_fill_manual(values = c("tomato2","midnight blue", "red", "cornflowerblue", "grey", "grey")) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+#add PH status
+PHstatus <- left_join(select(pheno, SampleID, dana1, ntprobnp, PARTITION), new, by = "SampleID") %>% filter(PARTITION != "VALIDATION") %>% select(SampleID, dana1) %>% mutate(rowIndex = as.numeric(row.names(.)))
+
+plotdetailThresh <- left_join(select(PHstatus, SampleID, dana1, rowIndex), recodedpredsThresh)  %>% select(-observed) %>% rowwise() %>% mutate(FPFN = sum(str_count(c_across(where(is.character)), "F"))) %>% ungroup()
+
+missclassesThresh<- left_join(select(plotdetailThresh, SampleID, FPFN), pheno, by = "SampleID") %>% mutate(FPFNbinary = ifelse(FPFN > 20, "High missclassified %", "Low misclassified %"))
+
+plotdetail_moreThresh <- left_join(plotdetailThresh, select(pheno, SampleID, treated), by = "SampleID") %>% mutate(FPFNbinary = ifelse(FPFN > 20, "High missclassified %", "Low misclassified %")) %>% arrange(dana1, FPFNbinary, treated) %>% select(-SampleID, -FPFN)  %>% mutate(rowIndex = as.numeric(row.names(.))) %>% melt(., id.vars = "rowIndex") %>% mutate(type = case_when(variable == "dana1" ~ "WHO classification", variable == "FPFNbinary" ~ "Misclassification", variable == "treated" ~ "Treatment status", TRUE ~ "" )) 
+plotdetail_moreThresh$type_f <- factor(plotdetail_moreThresh$type, levels = c("WHO classification", "", "Misclassification",  "Treatment status"))
+
+ggplot(plotdetail_moreThresh, aes(variable, rowIndex)) + geom_tile(aes(fill = value)) + scale_fill_manual(values=c("red", "blue", "black")) + scale_fill_manual(values = c("grey", "midnight blue", "deeppink", "dark red", "grey", "cornflowerblue", "midnight blue", "darksalmon", "grey", "grey", "dark red")) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + facet_grid(~type_f, scales= 'free_x', space = 'free_x')
+```
+
+
+## Validation XGBoost
+
+```{r}
+Val.XGB<- Validation[,colnames(xgb2TI)]
+XGB.Val.preds<- predict(xgb_tune_final_sTI, Val.XGB)
+XGBVal<- confusionMatrix(XGB.Val.preds, Validation$dana, positive = "target")
+XGBVal
+```
+
+## XGBoost ROC
+
+```{r, message=FALSE}
+xgbpredsDI<- predict(xgb_tune_final_sTI, Val.XGB, type = "prob")
+xgb.aucDI<- pROC::auc(predictor = xgbpredsDI$target, response = Validation$dana)
+xgb.rocV<- pROC::roc(predictor = xgbpredsDI$target, response = Validation$dana)
+plot(pROC::roc(predictor = xgbpredsDI$target, response = Validation$dana), main = paste("AUC:", round(xgb.aucDI,2)))
+```
+
+# BWH data
+
+```{r, message=FALSE, warning=FALSE}
+peak <- read_excel("/Volumes/GoogleDrive/Shared drives/MIREXS & Metabolon Retrospective Biomarker Study/BWH miRNA data/peak.xlsx")
+post <- read_excel("/Volumes/GoogleDrive/Shared drives/MIREXS & Metabolon Retrospective Biomarker Study/BWH miRNA data/post.xlsx")
+rest <- read_excel("/Volumes/GoogleDrive/Shared drives/MIREXS & Metabolon Retrospective Biomarker Study/BWH miRNA data/rest.xlsx")
+
+#swap - for . in miR names to match
+colnames(peak) <- gsub("-", ".", colnames(peak))
+colnames(post) <- gsub("-", ".", colnames(post))
+colnames(rest) <- gsub("-", ".", colnames(rest))
+```
+
+```{r}
+Val.XGBpeak<- peak[,colnames(xgb2TI)]
+XGB.Val.preds.peak<- predict(xgb_tune_final_sTI, Val.XGBpeak)
+#XGBValpeak<- confusionMatrix(XGB.Val.preds.peak, peak$dana)
+#XGBValpeak
+table(XGB.Val.preds.peak, peak$dana)
+
+Val.XGBpost<- post[,colnames(xgb2TI)]
+XGB.Val.preds.post<- predict(xgb_tune_final_sTI, Val.XGBpost)
+table(XGB.Val.preds.post, post$dana)
+
+Val.XGBrest<- rest[,colnames(xgb2TI)]
+XGB.Val.preds.rest<- predict(xgb_tune_final_sTI, Val.XGBrest)
+table(XGB.Val.preds.rest, rest$dana)
+```
+
+```{r, message=FALSE}
+xgbpredsDIpeak<- predict(xgb_tune_final_sTI, Val.XGBpeak, type = "prob")
+xgb.aucDI2<- pROC::auc(predictor = xgbpredsDIpeak$target, response = peak$dana)
+xgb.rocV2<- pROC::roc(predictor = xgbpredsDIpeak$target, response = peak$dana)
+pROC::ci.auc(xgb.aucDI2)
+plot(pROC::roc(predictor = xgbpredsDIpeak$target, response = peak$dana), main = paste("AUC:", round(xgb.aucDI2,2)))
+
+xgbpredsDIpost<- predict(xgb_tune_final_sTI, Val.XGBpost, type = "prob")
+xgb.aucDI2<- pROC::auc(predictor = xgbpredsDIpost$target, response = post$dana)
+xgb.rocV2<- pROC::roc(predictor = xgbpredsDIpost$target, response = post$dana)
+pROC::ci.auc(xgb.aucDI2)
+plot(pROC::roc(predictor = xgbpredsDIpost$target, response = post$dana), main = paste("AUC:", round(xgb.aucDI2,2)))
+
+xgbpredsDIrest<- predict(xgb_tune_final_sTI, Val.XGBrest, type = "prob")
+xgb.aucDI2<- pROC::auc(predictor = xgbpredsDIrest$target, response = rest$dana)
+xgb.rocV2<- pROC::roc(predictor = xgbpredsDIrest$target, response = rest$dana)
+pROC::ci.auc(xgb.aucDI2)
+plot(pROC::roc(predictor = xgbpredsDIrest$target, response = rest$dana), main = paste("AUC:", round(xgb.aucDI2,2)))
+
+```
+
+# miRNAs with high correlation between serum and plasma in XGB model
+
+Correlation coef > 0.7 (next highest ~0.4)
+
+```{r}
+highcors<- c("hsa.miR.10b.5p", "hsa.miR.30a.5p", "hsa.miR.193b.3p")
+
+```
+
+```{r}
+Combined <- all[all$PARTITION != "VALIDATION",] %>% select(-PARTITION)
+Validation <-all[all$PARTITION == "VALIDATION",] %>% select(-PARTITION)
+
+corXGBTI<- select(Combined, c("dana", all_of(highcors)))
+labelscorTI<- corXGBTI$dana
+corXGBTI<-  corXGBTI %>% select(-dana) %>% as.matrix(.)
+
+#Set up XGBoost with default hyperparameters
+
+train_control <- caret::trainControl(
+  method = "none",
+  verboseIter = FALSE, # no training log
+  allowParallel = TRUE # FALSE for reproducible results 
+)
+
+xgb_base_sTI<- caret::train( 
+  x = corXGBTI,
+  y = as.factor(labelscorTI),
+  trControl = train_control,
+  tuneGrid = grid_default,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labelscorTI)[[1]]/table(labelscorTI)[[2]]
+  )
+
+nrounds<- seq(from = 100, to =1000, by = 50)
+#tune using caret
+tune_grid <- expand.grid(
+  #nrounds = seq(from = 100, to = 1000, by = 20),
+  nrounds = nrounds,
+  eta = c(0.025, 0.05, 0.1, 0.2, 0.3),
+  max_depth = c(1, 2, 3, 4, 5, 6),
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = 1,
+  subsample = 1
+)
+
+set.seed(25)
+tune_control <- caret::trainControl(
+  method = "repeatedcv", # cross-validation
+  number = 10, # with n folds
+  repeats = 10, #the no. of complete sets of folds to compute
+  #index = createFolds(tr_treated$Id_clean), # fix the folds
+  verboseIter = FALSE, # no training log
+  allowParallel = TRUE, # 
+  savePredictions = TRUE,
+  classProbs = TRUE
+)
+
+set.seed(25)
+corxgb_tune_sTI <- caret::train(
+  x = corXGBTI,
+  y = as.factor(labelscorTI),
+  trControl = tune_control,
+  tuneGrid = tune_grid,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labelscorTI)[[1]]/table(labelscorTI)[[2]]
+)
+
+kable(corxgb_tune_sTI$bestTune, caption = "1st tuning, best parameters")%>% kable_styling(full_width = TRUE)
+
+cortune_grid2sTI <- expand.grid(
+  nrounds = nrounds,
+  eta = corxgb_tune_sTI$bestTune$eta,
+  max_depth = seq(from = 1, to =10, by = 1),
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = c(1,2,3,4,5,6),
+  subsample = 1
+)
+
+set.seed(25)
+corxgb_tune2sTI <- caret::train(
+  x = corXGBTI,
+  y = as.factor(labelscorTI),
+  trControl = tune_control,
+  tuneGrid = cortune_grid2sTI,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labelscorTI)[[1]]/table(labelscorTI)[[2]]
+)
+
+kable(corxgb_tune2sTI$bestTune, caption = "2nd tuning, best parameters")%>% kable_styling(full_width = TRUE)
+
+cortune_grid3sTI <- expand.grid(
+  nrounds = nrounds,
+  eta = corxgb_tune_sTI$bestTune$eta,
+  max_depth = corxgb_tune2sTI$bestTune$max_depth,
+  gamma = 0,
+  colsample_bytree = c(0.4, 0.6, 0.8, 1.0),
+  min_child_weight = corxgb_tune2sTI$bestTune$min_child_weight,
+  subsample = c(0.5, 0.75, 1.0)
+)
+
+set.seed(25)
+corxgb_tune3sTI <- caret::train(
+  x = corXGBTI,
+  y = as.factor(labelscorTI),
+  trControl = tune_control,
+  tuneGrid = cortune_grid3sTI,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labelscorTI)[[1]]/table(labelscorTI)[[2]]
+)
+
+kable(corxgb_tune3sTI$bestTune, caption = "3rd tuning, best parameters")%>% kable_styling(full_width = TRUE)
+
+cortune_grid4sTI <- expand.grid(
+  nrounds = nrounds,
+  eta = corxgb_tune_sTI$bestTune$eta,
+  max_depth = corxgb_tune3sTI$bestTune$max_depth,
+  gamma = c(0,0.05, 0.1, 0.5, 0.7, 0.9, 1),
+  colsample_bytree = corxgb_tune3sTI$bestTune$colsample_bytree,
+  min_child_weight = corxgb_tune2sTI$bestTune$min_child_weight,
+  subsample = corxgb_tune3sTI$bestTune$subsample
+)
+```
+
+```{r}
+set.seed(25)
+corxgb_tune4sTI <- caret::train(
+  x = corXGBTI,
+  y = as.factor(labelscorTI),
+  trControl = tune_control,
+  tuneGrid = cortune_grid4sTI,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labelscorTI)[[1]]/table(labelscorTI)[[2]]
+)
+
+kable(corxgb_tune4sTI$bestTune, caption = "4th tuning, best parameters")%>% kable_styling(full_width = TRUE)
+
+cortune_grid5sTI <- expand.grid(
+  nrounds = seq(from = 100, to = 10000, by = 50),
+  eta = c(0.01,0.025,0.05,0.1,0.2,0.3),
+  max_depth = corxgb_tune3sTI$bestTune$max_depth,
+  gamma = corxgb_tune4sTI$bestTune$gamma,
+  colsample_bytree = corxgb_tune3sTI$bestTune$colsample_bytree,
+  min_child_weight = corxgb_tune2sTI$bestTune$min_child_weight,
+  subsample = corxgb_tune3sTI$bestTune$subsample
+)
+
+set.seed(25)
+corxgb_tune5sTI <- caret::train(
+  x = corXGBTI,
+  y = as.factor(labelscorTI),
+  trControl = tune_control,
+  tuneGrid = cortune_grid5sTI,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labelscorTI)[[1]]/table(labelscorTI)[[2]]
+)
+
+kable(corxgb_tune5sTI$bestTune, caption = "5th tuning, best parameters")%>% kable_styling(full_width = TRUE)
+
+```
+
+```{r}
+corfinal_grid_sTI <- expand.grid(
+  nrounds = corxgb_tune5sTI$bestTune$nrounds,
+  eta = corxgb_tune5sTI$bestTune$eta,
+  max_depth = corxgb_tune5sTI$bestTune$max_depth,
+  gamma = corxgb_tune5sTI$bestTune$gamma,
+  colsample_bytree = corxgb_tune5sTI$bestTune$colsample_bytree,
+  min_child_weight = corxgb_tune5sTI$bestTune$min_child_weight,
+  subsample = corxgb_tune5sTI$bestTune$subsample
+)
+
+set.seed(25)
+corxgb_tune_final_sTI <- caret::train(
+  x = corXGBTI,
+  y = as.factor(labelscorTI),
+  trControl = tune_control,
+  tuneGrid = final_grid_sTI,
+  method = "xgbTree",
+  verbose = TRUE,
+  scale_pos_weight = table(labelscorTI)[[1]]/table(labelscorTI)[[2]]
+)
+```
+
+```{r}
+kable(corxgb_tune_final_sTI$bestTune, caption = "Final tuning, best parameters")%>% kable_styling(full_width = TRUE)
+```
+
+```{r}
+tosplitcor<- corxgb_tune_final_sTI
+XGB.splitcor<- split(tosplitcor$pred, tosplitcor$pred$Resample)
+parallel::mclapply(repeatX, function(d) {
+  pROC::auc(pROC::roc(predictor = XGB.splitcor[[d]]$target, response = XGB.splitcor[[d]]$obs))[1]
+}) %>% unlist() %>% hist(main = paste("XGBoost CV mean AUC:", round(mean(.),2)))
+
+corXGBvarsDI<- varImp(corxgb_tune_final_sTI)[[1]]%>% filter(Overall > 0) %>% rownames_to_column() %>% arrange(desc(Overall)) %>% select(miR = rowname, XGBIMP = Overall) 
+kable(corXGBvarsDI, caption = "Importance weights for XGB model with miRNAs which correlate between plasma & serum") %>% kable_styling(full_width = TRUE)
+
+```
+
+# ROC with CI
+
+```{r}
+xgb.rocDI<- pROC::roc(predictor = xgbpredsDI$target, response = Validation$dana)
+xgb.rocDI
+
+xgbpredsDI$dana <- Validation$dana
+xgbpredsDI$SampleID <- Validation$SampleID
+
+xgbpredsDI %>% group_by(dana) %>% summarise(mean(target))
+
+NTproBNP.rocV <- pROC::roc(predictor = Valntprobnppreds$target, response = Valntprobnp$dana, ci = TRUE)
+NTproBNP.rocV
+
+roc.list.short <- list("XGB miRNA model" = xgb.rocDI, "NT-proBNP alone" = NTproBNP.rocV)
+
+ci.list <- lapply(roc.list.short, pROC::ci.se, specificities = seq(0, 1, l = 25))
+
+dat.ci.list <- lapply(ci.list, function(ciobj) 
+  data.frame(x = as.numeric(rownames(ciobj)),
+             lower = ciobj[, 1],
+             upper = ciobj[, 3]))
+
+p <- pROC::ggroc(roc.list.short, aes = "color") + scale_color_manual(values = c("deeppink","darkgreen")) + theme(text = element_text(size = 14), panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))  +  guides(fill=guide_legend(title=""))  + labs(color = "")
+
+for(i in 1:2) {
+  p <- p + geom_ribbon(
+    data = dat.ci.list[[i]],
+    aes(x = x, ymin = lower, ymax = upper),
+    fill = i + 1,
+    alpha = 0.2,
+    inherit.aes = F) 
+  } 
+
+p + ggtitle("PH vs DC")
+
+
+```
+
+```{r}
+ci.list <- lapply(roc.list.short, pROC::ci.se, fpr = seq(0, 1, l = 50))
+
+dat.ci.list <- lapply(ci.list, function(ciobj) 
+  data.frame(x = as.numeric(rownames(ciobj)),
+             lower = ciobj[, 1],
+             upper = ciobj[, 3]))
+
+dat.ci.list$`XGB miRNA model`$x2 <- seq(1,0, -0.1)
+dat.ci.list$`NT-proBNP alone`$x2 <- seq(1,0, -0.1)
+
+p <- pROC::ggroc(roc.list.short, aes = "color", legacy.axes = TRUE) + scale_color_manual(values = c("deeppink","darkgreen")) + theme(text = element_text(size = 14), axis.text = element_text(size = 14), panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))  +  guides(fill=guide_legend(title=""))  + labs(color = "")
+
+for(i in 1:2) {
+  p <- p + geom_ribbon(
+    data = dat.ci.list[[i]],
+    aes(x = x2, ymin = lower, ymax = upper),
+    fill = i + 1,
+    alpha = 0.2,
+    inherit.aes = F) 
+} 
+
+p + ggtitle("PH vs DC")
+```
+
+```{r}
+library(yardstick)
+XGBforpr <- as.data.frame(cbind(xgbpredsDI$Cont, as.factor(Validation$dana)))
+XGBforpr$V2 <- Validation$dana
+prXGB <- pr_curve(XGBforpr, truth = V2, Class1 = V1)
+pr_auc(XGBforpr, truth = V2, Class1 = V1) %>% kable(., cpation = "AUC for PR curve, miRNA model")
+prXGB$type <- "miRNA XGBoost model"
+
+NTforpr <- as.data.frame(cbind(Valntprobnppreds$Cont, as.factor(Valntprobnp$dana)))
+NTforpr$V2 <- Valntprobnp$dana
+prNT <- pr_curve(NTforpr, truth = V2, Class1 = V1)
+prNT$type <- "NT-proBNP"
+pr_auc(NTforpr, truth = V2, Class1 = V1) %>% kable(., cpation = "AUC for PR curve, NT-proBNP model")
+
+prdata<- rbind(prXGB, prNT)
+
+ggplot(prdata, aes(x = recall, y = precision, group = type)) +
+  geom_path(aes(color = type)) +ylim(c(0,1)) + scale_color_manual(values = c("deeppink","midnightblue")) + theme(text = element_text(size = 14), panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))  +  guides(fill=guide_legend(title=""))  + labs(color = "") + ggtitle("PH vs DC")
+
+
+XGBDIpredsThresh <- tosplitTI$pred %>% arrange(rowIndex) %>% mutate(timev = rep(seq(1,10),length(LASSO.1se.DI$pred$rowIndex)/10)) %>% select(rowIndex, obs, target, timev) 
+
+paste("XGB mean threshold:", mean(XGBthresholdspecs$threshold)) #fpr, tnr tpr fnr sensitivity specificity
+
+XGBthresholdsNew<- lapply(1:100, function(d) {
+  pROC::coords(XGBlistofrocs[[d]], "best",  "fpr") }) %>% unlist()
+XGBthresholdspecsNew <- data.frame(threshold = double(), specificity = double(), sensitivity = double())
+for(i in 1:100) {
+ XGBthresholdspecsNew[i,] <- unlist(XGBthresholdsNew[i])
+}
+
+paste("XGB mean threshold:", median(XGBthresholdspecsNew$threshold))
+
+
+XGBDIpredsThreshNew <- tosplitTI$pred %>% arrange(rowIndex) %>% mutate(timev = rep(seq(1,10),length(tosplitTI$pred$rowIndex)/10)) %>% select(rowIndex, obs, target, timev) %>% mutate(pred.T = ifelse(target > median(XGBthresholdspecs$threshold), "target", "Cont")) %>%  mutate(XGB = case_when(obs == "Cont" & pred.T == "Cont" ~ "TN", obs == "Cont" & pred.T == "target" ~ "FP", obs == "target" & pred.T == "Cont" ~ "FN", obs == "target" & pred.T == "target" ~ "TP")) %>% reshape(idvar = "rowIndex", timevar = "timev", direction = "wide")
+XGBDIpredsThreshNew <- select(XGBDIpredsThreshNew, rowIndex, obs.1, grep("^pred.T", colnames(XGBDIpredsThreshNew)), grep("^XGB", colnames(XGBDIpredsThreshNew))) 
+
+allpredsThresh <- left_join(select(RFDIpredsThresh, rowIndex, observed, grep("^pred.", colnames(RFDIpredsThresh))), select(rpartDIpredsThresh, rowIndex, grep("^pred.", colnames(rpartDIpredsThresh))), by = "rowIndex") %>% left_join(., select(LASSO1seDIpredsThresh, rowIndex, grep("^pred.", colnames(LASSO1seDIpredsThresh))), by = "rowIndex") %>% left_join(., select(XGBDIpredsThreshNew, rowIndex, grep("^pred.", colnames(XGBDIpredsThreshNew))), by = "rowIndex")
+
+recodedpredsThreshM <- left_join(select(RFDIpredsThresh, observed, rowIndex, grep("^RF.", colnames(RFDIpredsThresh))), select(rpartDIpredsThresh, rowIndex, grep("^rpart.", colnames(rpartDIpredsThresh))), by = "rowIndex") %>% left_join(., select(LASSO1seDIpredsThresh, rowIndex, grep("^LASSO", colnames(LASSO1seDIpredsThresh))), by = "rowIndex")%>% left_join(., select(XGBDIpredsThreshNew, rowIndex, grep("^XGB", colnames(XGBDIpredsThreshNew))), by = "rowIndex")
+
+plotdataThreshM <- recodedpredsThreshM %>% arrange(observed)  %>% mutate(rowIndex = as.numeric(row.names(.))) %>% melt(., id.vars = "rowIndex") 
+
+ggplot(plotdataThreshM, aes(variable, rowIndex)) + geom_tile(aes(fill = value)) + scale_fill_manual(values=c("red", "blue", "black")) + scale_fill_manual(values = c("tomato2","midnight blue", "red", "cornflowerblue", "grey", "grey")) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+```
+
+RF parameters
+
+```{r}
+paste("ntree:", ntree)
+fit.DI$bestTune$predFixed
+```
+
+```{r, include=FALSE, cache=FALSE}
+save.image(file = "PHvsDC.RData") # 
+#when reloading from image file, libraries must be loaded too
+#library(pacman)
+#p_load("kableExtra","caret","tidyverse","reshape2","e1071","JamesTools","OptimalCutpoints","Boruta","ggplot2","randomForest","ROCR","rpart","party","rpart.plot","partykit","glmnet","xgboost","RColorBrewer", "pheatmap")
+#load("PHvsDC.RData")
+```
+
+
+# miRNAs in panel
+
+```{r}
+miRlevels <- function(miR, ylab) {
+  ggplot(Combined, aes(x=danalong, y = miR)) + geom_boxplot(fill = c("deeppink", "midnight blue")) + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"), text = element_text(size = 14)) + labs(x = "", y = ylab)
+}
+#miRlevels(Combined$hsa.miR.361.3p, "Hsa-miR-361-3p")
+
+xgbforboxplot <- Combined %>% select(XGBvarsDI$miR, dana) %>% mutate(dana = recode(dana, "target" = "PH", "Cont" = "DC")) %>% pivot_longer(c(-dana), names_to = "miRNA", values_to = "Expression") %>% mutate(miRNA = gsub(pattern = "\\.", replacement = "-", x = miRNA))
+
+ggplot(xgbforboxplot, aes(x=dana, y = Expression, fill = dana)) + geom_boxplot() + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"), text = element_text(size = 14)) + labs(x = "") + facet_wrap(~miRNA, scales = "free") + scale_fill_manual(values = c("deeppink", "midnight blue"))
+
+library(tidytext)
+XGBvarsDIplot <- XGBvarsDI %>% mutate(miRNA = gsub("\\.", "-", miR)) %>% select(-miR) %>% mutate(miRNA = factor(miRNA, levels = miRNA))
+ggplot(XGBvarsDIplot, aes(x = miRNA, y = XGBIMP)) + geom_col(fill = "midnight blue")  + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"), text = element_text(size = 14), axis.text.x = element_text(angle = 90)) + labs (y = "Relative Importance", x ="")
+```
+
+

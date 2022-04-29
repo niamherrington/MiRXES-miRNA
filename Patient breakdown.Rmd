@@ -1,0 +1,398 @@
+---
+title: "Patient breakdown"
+author: "Niamh Errington"
+date: "`r format(Sys.time(), '%d %B %Y')`" 
+output: 
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+    toc_collapsed: false
+---
+
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = FALSE)
+library(kableExtra)
+```
+
+```{r, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(readr)
+library(kableExtra)
+library(readxl)
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+#Data processing
+pheno <- read_csv("../Phenocleaning/phenotoclean.csv")
+load("../Phenocleaning/miRData.RData") 
+
+all <- left_join(pheno, new, by = "SampleID") %>% filter(dana != "HC")
+
+MIRXES_data <- read_excel("/Volumes/GoogleDrive/Shared drives/MIREXS & Metabolon Retrospective Biomarker Study/Raw Data/Training set miRNA data/UK PH Discovery and IA miRNA Expression Data_Normalized for Technical Variation.xlsx", 
+    skip = 1) %>% rename(SampleID = PID) %>% filter(Type == "serum")
+
+TRAINING <- read_csv("/Volumes/GoogleDrive/Shared drives/MIREXS & Metabolon Retrospective Biomarker Study/UK DATA SHARE/TRAINING.csv")
+
+sample_uk_serum_used <- read_excel("/Volumes/GoogleDrive/Shared drives/MIREXS & Metabolon Retrospective Biomarker Study/Dec2020 new miRNA datafiles from MiREXES/sample_uk_serum_used.xlsx") %>% rename(SampleID = patient)
+```
+
+IDs in mirxes not used:
+```{r}
+sample_uk_serum_used$SampleID[!(sample_uk_serum_used$SampleID %in% all$SampleID)]
+```
+
+Haemolysis Index not present:
+
+```{r}
+table(is.na(MIRXES_data$`Haemolysis Index`)) 
+
+all <- left_join(pheno, new, by = "SampleID") %>% filter(dana != "HC")
+partitionfill <- c("deeppink", "midnightblue", "cornflowerblue")
+paste("Number of miRNAs used:", length(grep("*hsa", colnames(all))))
+```
+
+```{r}
+addmargins(table(all$PARTITION)) %>% kable(., col.names = c("Partition", "n"))
+
+paste("Training + Interim:", 185+952)
+```
+
+# Clinical Parameters 
+
+## DANA
+
+```{r}
+table(is.na(all$dana))
+
+addmargins(table(all$dana, all$PARTITION)) %>% kable(., caption = "DANA by PARTITION") %>% kable_styling(full_width = TRUE)
+
+addmargins(table(all$dana, all$site)) %>% kable(., caption = "DANA by site") %>% kable_styling(full_width = TRUE)
+```
+
+## Sex
+
+```{r}
+kable(cbind(table(is.na(all$sex)), prop.table(table(is.na(all$sex)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+
+kable(cbind(table(all$sex), prop.table(table(all$sex))*100), col.names = c("n", "%")) %>% kable_styling(full_width = TRUE)
+
+table(all$sex) %>% kable(., col.names = c("Sex", "n"))
+
+addmargins(table(all$sex, all$PARTITION)) %>% kable(., caption = "Sex by PARTITION") %>% kable_styling(full_width = TRUE)
+kable(prop.table(table(all$sex, all$PARTITION),2)*100, caption = "Sex by PARTITION, %") %>% kable_styling(full_width = TRUE)
+```
+
+
+## On treatment at sampling
+
+```{r}
+kable(cbind(table(is.na(all$treated)), prop.table(table(is.na(all$treated)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+
+kable(cbind(table(all$treated), prop.table(table(all$treated))*100), col.names = c("n", "%")) %>% kable_styling(full_width = TRUE)
+
+
+addmargins(table(all$treated, all$PARTITION)) %>% kable(., caption = "Treatment naive status by PARTITION") %>% kable_styling(full_width = TRUE)
+kable(prop.table(table(all$treated, all$PARTITION),2)*100, caption = "Treatment naive status by PARTITION, %") %>% kable_styling(full_width = TRUE)
+```
+
+```{r}
+kable(cbind(table(is.na(all$ERA)), prop.table(table(is.na(all$treated)))*100), col.names = c("Missing Values", "%"), caption = "ERA") %>% kable_styling(full_width = TRUE)
+
+kable(table(all$ERA, all$PARTITION), caption = "ERA") %>% kable_styling(full_width = TRUE)
+```
+
+
+```{r}
+kable(cbind(table(is.na(all$PDE5)), prop.table(table(is.na(all$treated)))*100), col.names = c("Missing Values", "%"), caption = "PDE5") %>% kable_styling(full_width = TRUE)
+
+kable(table(all$PDE5, all$PARTITION), caption = "PDE5") %>% kable_styling(full_width = TRUE)
+```
+
+```{r}
+kable(cbind(table(is.na(all$Prostanoid)), prop.table(table(is.na(all$treated)))*100), col.names = c("Missing Values", "%"), caption = "Prostanoid") %>% kable_styling(full_width = TRUE)
+
+kable(table(all$Prostanoid, all$PARTITION), caption = "Prostanoid") %>% kable_styling(full_width = TRUE)
+```
+
+```{r}
+kable(cbind(table(is.na(all$Other)), prop.table(table(is.na(all$treated)))*100), col.names = c("Missing Values", "%"), caption = "Other PH drugs") %>% kable_styling(full_width = TRUE)
+
+kable(table(all$Other, all$PARTITION), caption = "Other PH drugs") %>% kable_styling(full_width = TRUE)
+```
+
+## FC
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(all$fclass)), prop.table(table(is.na(all$fclass)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+
+addmargins(table(all$fclass, all$PARTITION)) %>% kable(., caption = "Functional Class by PARTITION") %>% kable_styling(full_width = TRUE)
+
+kable(prop.table(table(all$fclass, all$PARTITION),2)*100, caption = "FC by PARTITION, %") %>% kable_styling(full_width = TRUE)
+```
+
+
+## Site
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(all$site)), prop.table(table(is.na(all$site)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+
+addmargins(table(all$site, all$PARTITION)) %>% kable(., caption = "Site by PARTITION") %>% kable_styling(full_width = TRUE)
+
+kable(prop.table(table(all$site, all$PARTITION),2)*100, caption = "Site by PARTITION, %") %>% kable_styling(full_width = TRUE)
+```
+
+## BMI
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(all$bmi)), prop.table(table(is.na(all$bmi)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+```
+
+Not normally distributed
+
+```{r}
+all %>% filter(!is.na(bmi)) %>% group_by(PARTITION) %>% ggplot(aes(x = bmi)) + geom_histogram()
+
+all %>% select(PARTITION, bmi) %>% filter(!is.na(bmi)) %>% ggplot(aes(x= PARTITION, y =bmi)) + geom_boxplot(fill = partitionfill) + labs(x = "PARTITION", y = "BMI") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+all %>% filter(!is.na(bmi)) %>% group_by(PARTITION) %>% summarise(Shapiro.pvalue = shapiro.test(bmi)$p.value, Mean = mean(bmi), Variance = var(bmi), LogMean = mean(log(bmi)), LogVariance = var(log(bmi)), Median = median(bmi), IQR = IQR(bmi)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+all %>% filter(!is.na(bmi)) %>% summarise(Shapiro.pvalue = shapiro.test(bmi)$p.value, Mean = mean(bmi), Variance = var(bmi), LogMean = mean(log(bmi)), LogVariance = var(log(bmi)), Median = median(bmi), IQR = IQR(bmi)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+```
+
+## Age
+
+Not normally distributed
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(all$age)), prop.table(table(is.na(all$age)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+
+all %>% select(PARTITION, age) %>% filter(!is.na(age)) %>% ggplot(aes(x= PARTITION, y =age)) + geom_boxplot(fill = partitionfill) + labs(x = "PARTITION", y = "Age") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+all %>%filter(!is.na(age)) %>% group_by(PARTITION) %>% summarise(Shapiro.pvalue = shapiro.test(age)$p.value, Mean =mean(age), Variance = var(age), LogMean = mean(log(age)), LogVariance = var(log(age)), Median = median(age), IQR = IQR(age)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+all %>%filter(!is.na(age)) %>% summarise(Shapiro.pvalue = shapiro.test(age)$p.value, Mean =mean(age), Variance = var(age), LogMean = mean(log(age)), LogVariance = var(log(age)), Median = median(age), IQR = IQR(age)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+```
+
+## NTproBNP
+
+Not normally distributed.
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(all$ntprobnp)), prop.table(table(is.na(all$ntprobnp)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+
+all %>% select(PARTITION, ntprobnp) %>% ggplot(aes(x= PARTITION, y = ntprobnp)) + geom_boxplot(fill=partitionfill) + labs(x = "Partition", y = "NT-proBNP") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+group_by(all, PARTITION) %>% summarise(Shapiro.pvalue = shapiro.test(ntprobnp)$p.value, Variance = var(ntprobnp), Mean = mean(ntprobnp), Median = median(ntprobnp), IQR = IQR(ntprobnp)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+all %>% summarise(Shapiro.pvalue = shapiro.test(ntprobnp)$p.value, Variance = var(ntprobnp), Mean = mean(ntprobnp), Median = median(ntprobnp), IQR = IQR(ntprobnp)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+```
+
+## Uric Acid
+
+Not all normally distributed.
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(all$ua)), prop.table(table(is.na(all$ua)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+all %>% select(PARTITION, ua) %>% ggplot(aes(x= PARTITION, y = ua)) + geom_boxplot(fill=partitionfill) + labs(x = "Partition", y = "Uric Acid") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+group_by(all, PARTITION) %>% summarise(Shapiro.pvalue = shapiro.test(ua)$p.value, Variance = var(ua), Mean = mean(ua), Median = median(ua), IQR = IQR(ua)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+
+all %>% summarise(Shapiro.pvalue = shapiro.test(ua)$p.value, Variance = var(ua), Mean = mean(ua), Median = median(ua), IQR = IQR(ua)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+```
+
+
+## Blood pressure - diastolic
+
+Not all normally distributed.
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(all$bpdia)), prop.table(table(is.na(all$bpdia)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+all %>% select(PARTITION, bpdia) %>% ggplot(aes(x= PARTITION, y = bpdia)) + geom_boxplot(fill=partitionfill) + labs(x = "Partition", y = "Uric Acid") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+all %>% filter(!is.na(bpdia)) %>% group_by(PARTITION) %>% summarise(Shapiro.pvalue = shapiro.test(bpdia)$p.value, Variance = var(bpdia), Mean = mean(bpdia), Median = median(bpdia), IQR = IQR(bpdia)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+all %>% filter(!is.na(bpdia)) %>% summarise(Shapiro.pvalue = shapiro.test(bpdia)$p.value, Variance = var(bpdia), Mean = mean(bpdia), Median = median(bpdia), IQR = IQR(bpdia)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+```
+
+## Blood pressure - systolic
+
+Not all normally distributed.
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(all$ua)), prop.table(table(is.na(all$ua)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+
+all %>% select(PARTITION, bpsys) %>% ggplot(aes(x= PARTITION, y = bpsys)) + geom_boxplot(fill=partitionfill) + labs(x = "Partition", y = "Uric Acid") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+all %>% filter(!is.na(bpsys)) %>% group_by(PARTITION) %>% summarise(Shapiro.pvalue = shapiro.test(bpsys)$p.value, Variance = var(bpsys), Mean = mean(bpsys), Median = median(bpsys), IQR = IQR(bpsys)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+all %>% filter(!is.na(bpsys))  %>% summarise(Shapiro.pvalue = shapiro.test(bpsys)$p.value, Variance = var(bpsys), Mean = mean(bpsys), Median = median(bpsys), IQR = IQR(bpsys)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+```
+
+## PVR
+
+Not all normally distributed.
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(all$PVRdynes)), prop.table(table(is.na(all$PVRdynes)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+
+all %>% select(PARTITION, PVRdynes) %>% ggplot(aes(x= PARTITION, y = PVRdynes)) + geom_boxplot(fill=partitionfill) + labs(x = "Partition", y = "PVR") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+all %>% filter(!is.na(PVRdynes)) %>% group_by(PARTITION) %>% summarise(Shapiro.pvalue = shapiro.test(PVRdynes)$p.value, Variance = var(PVRdynes), Mean = mean(PVRdynes), Median = median(PVRdynes), IQR = IQR(PVRdynes)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+all %>% filter(!is.na(PVRdynes)) %>% summarise(Shapiro.pvalue = shapiro.test(PVRdynes)$p.value, Variance = var(PVRdynes), Mean = mean(PVRdynes), Median = median(PVRdynes), IQR = IQR(PVRdynes)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+
+```
+
+## Creatinine
+
+Not all normally distributed.
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(all$Creatinine)), prop.table(table(is.na(all$Creatinine)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+
+all %>% select(PARTITION, Creatinine) %>% ggplot(aes(x= PARTITION, y = Creatinine)) + geom_boxplot(fill=partitionfill) + labs(x = "Partition", y = "Creatinine") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+all %>% filter(!is.na(Creatinine)) %>% group_by(PARTITION) %>% summarise(Shapiro.pvalue = shapiro.test(Creatinine)$p.value, Variance = var(Creatinine), Mean = mean(Creatinine), Median = median(Creatinine), IQR = IQR(Creatinine)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+all %>% filter(!is.na(Creatinine)) %>% summarise(Shapiro.pvalue = shapiro.test(Creatinine)$p.value, Variance = var(Creatinine), Mean = mean(Creatinine), Median = median(Creatinine), IQR = IQR(Creatinine)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+
+```
+
+
+## mPAP
+
+Not all normally distributed.
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(all$mPAP)), prop.table(table(is.na(all$mPAP)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+
+all %>% select(PARTITION, mPAP) %>% ggplot(aes(x= PARTITION, y = mPAP)) + geom_boxplot(fill=partitionfill) + labs(x = "Partition", y = "mPAP") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+all %>% filter(!is.na(mPAP)) %>% group_by(PARTITION) %>% summarise(Shapiro.pvalue = shapiro.test(mPAP)$p.value, Variance = var(mPAP), Mean = mean(mPAP), Median = median(mPAP), IQR = IQR(mPAP)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+all %>% filter(!is.na(mPAP)) %>% summarise(Shapiro.pvalue = shapiro.test(mPAP)$p.value, Variance = var(mPAP), Mean = mean(mPAP), Median = median(mPAP), IQR = IQR(mPAP)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+
+```
+
+
+## Cardiac Index
+
+Not all normally distributed.
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(all$CardiacIndex)), prop.table(table(is.na(all$CardiacIndex)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+
+all %>% select(PARTITION, CardiacIndex) %>% ggplot(aes(x= PARTITION, y = CardiacIndex)) + geom_boxplot(fill=partitionfill) + labs(x = "Partition", y = "mPAP") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+all %>% filter(!is.na(CardiacIndex)) %>% group_by(PARTITION) %>% summarise(Shapiro.pvalue = shapiro.test(CardiacIndex)$p.value, Variance = var(CardiacIndex), Mean = mean(CardiacIndex), Median = median(CardiacIndex), IQR = IQR(CardiacIndex)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+all %>% filter(!is.na(CardiacIndex)) %>% summarise(Shapiro.pvalue = shapiro.test(CardiacIndex)$p.value, Variance = var(CardiacIndex), Mean = mean(CardiacIndex), Median = median(CardiacIndex), IQR = IQR(CardiacIndex)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+
+```
+
+## Cardiac Output
+
+Not all normally distributed.
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(all$CardiacOutput)), prop.table(table(is.na(all$CardiacOutput)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+
+all %>% select(PARTITION, CardiacOutput) %>% ggplot(aes(x= PARTITION, y = CardiacOutput)) + geom_boxplot(fill=partitionfill) + labs(x = "Partition", y = "mPAP") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+all %>% filter(!is.na(CardiacOutput)) %>% group_by(PARTITION) %>% summarise(Shapiro.pvalue = shapiro.test(CardiacOutput)$p.value, Variance = var(CardiacOutput), Mean = mean(CardiacOutput), Median = median(CardiacOutput), IQR = IQR(CardiacOutput)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+all %>% filter(!is.na(CardiacOutput)) %>% summarise(Shapiro.pvalue = shapiro.test(CardiacOutput)$p.value, Variance = var(CardiacOutput), Mean = mean(CardiacOutput), Median = median(CardiacOutput), IQR = IQR(CardiacOutput)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+
+```
+
+
+
+# Correlations
+
+```{r}
+forcorr <- select(all, -dana,  -dana1.1, -dana1.1.1, -dana1.1.1.1, -PARTITION, -thyroid_disease, -t2dm, -copd, -SleepApnoea, -ihd, -AtrialFibrillation, -runid, -OtherCTD, -ssc, -ERA, -Prostanoid, -PDE5, -Other, -sex, -site, - treated, -Ethnicity)
+PHpatients <- all %>% filter(dana1 %in% c("PH1", "PH2", "PH3", "PH4", "PH5"))
+DC <- all %>% filter(dana1 == "PH0")
+PAHpatients <- all %>% filter(dana1 == "PH1")
+CTEPHpatients <- all %>% filter(dana1 == "PH4")
+
+library(lares)
+
+corr_cross(forcorr, # name of dataset
+           contains = c("age", "bmi", "bpsys", "bpdia", "fclass", "smwd", "fvcp", "ntprobnp", "ua", "platelet_count", "eGFR", "mPAP", "mRAP", "PAWP", "dPAP", "sPAP", "SvO2", "tlco_predicted", "PVRdynes", "Cardiac Index", "Cardiac Output", "mRAP"),
+  top = 100 # display top 10 couples of variables (by correlation coefficient)
+)
+```
+
+
+```{r}
+allcors<- corr_cross(forcorr, # name of dataset
+           contains = c("age", "bmi", "bpsys", "bpdia", "fclass", "smwd", "fvcp", "ntprobnp", "ua", "platelet_count", "eGFR", "mPAP", "mRAP", "PAWP", "dPAP", "sPAP", "SvO2", "tlco_predicted", "PVRdynes", "Cardiac Index", "Cardiac Output", "mRAP"), type = 2
+)
+
+allcorsdata<- allcors$data 
+allcorsdata %>% mutate(adjpval = round(p.adjust(pvalue, "BH"), 4)) %>% filter(adjpval < 0.05) %>% filter(size > 0.2) %>% filter(grepl("hsa", mix)) %>% select(key, mix, size, corr, pvalue, adjpval) %>% kable(., caption = "Correlation coefficients > 0.2 for clinical parameters & miRNAs, adjuster pvalue < 0.05") %>% kable_styling(full_width = TRUE)
+
+```
+
+
+## PVR
+
+```{r}
+corrPVR<- corr_cross(forcorr, # name of dataset,
+           type = 1,
+           contains = "PVRdynes", top = 100)
+
+corrPVR<- corrPVR$data
+corrPVR %>% filter(grepl("hsa", mix)) %>% select(Comparison = label, `correlation coeff` = corr, `absolute correlation coeff` = abs, pvalue) %>% mutate(`Adjusted Pvalue` = round(p.adjust(pvalue, "BH"), 4)) %>% filter(`Adjusted Pvalue` < 0.05) %>% kable(., caption = "miRNAs correlating with PVR, adjusted pvalue < 0.05") %>% kable_styling(full_width = TRUE)
+```
+
+## mPAP
+
+```{r}
+#corr_cross(forcorr,  name of dataset, type = 2, contains = "mPAP", max_pvalue = 0.05 )
+
+corrmPAP<- corr_cross(forcorr, # name of dataset,
+           type = 1,
+           contains = "mPAP", top = 100)
+
+corrmPAP<- corrmPAP$data
+corrmPAP %>%filter(grepl("hsa", mix)) %>% select(Comparison = label, `correlation coeff` = corr, `absolute correlation coeff` = abs, pvalue) %>% mutate(`Adjusted Pvalue` = round(p.adjust(pvalue, "BH"), 4)) %>% filter(`Adjusted Pvalue` < 0.05) %>% kable(., caption = "miRNAs correlating with mPAP, adjusted pvalue < 0.05") %>% kable_styling(full_width = TRUE)
+```
+
+## dPAP
+
+```{r}
+#corr_cross(forcorr, name of dataset,   type = 2,    contains = "dPAP", max_pvalue = 0.05 )
+
+corrdPAP<- corr_cross(forcorr, # name of dataset,
+           type = 1,
+           contains = "dPAP", top = 100)
+
+corrdPAP<- corrdPAP$data
+corrdPAP %>% filter(grepl("hsa", mix)) %>% select(Comparison = label, `correlation coeff` = corr, `absolute correlation coeff` = abs, pvalue) %>% mutate(`Adjusted Pvalue` = round(p.adjust(pvalue, "BH"), 4))%>% filter(`Adjusted Pvalue` < 0.05) %>% kable(., caption = "miRNAs correlating with dPAP, adjusted pvalue < 0.05") %>% kable_styling(full_width = TRUE)
+```
+
+
+
+
+```{r}
+save.image("PatientBreakdown.RData")
+load("PatientBreakdown.RData")
+```
+
+

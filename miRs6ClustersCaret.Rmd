@@ -1,0 +1,752 @@
+---
+title: "miRs 6 clusters"
+author: "Niamh Errington"
+date: "`r format(Sys.time(), '%d %B %Y')`" 
+output: 
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+    toc_collapsed: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(kableExtra)
+```
+
+```{r, message=FALSE}
+#load libraries
+library(glmnet)
+library(caret)
+library(tidyverse)
+library(dunn.test)
+library(survival)
+library(survminer)
+library(readxl)
+library(viridis)
+library(tidytext) #reorder_within
+```
+
+```{r, message=FALSE, warning=FALSE, cache=TRUE}
+#Read in data & create data set for each cluster
+Clusterpheno<-  read_csv("../Clusterpheno.csv")
+TrainingmiRs<- Clusterpheno %>% select(SampleID, PARTITION, cluster6, starts_with("hsa"))
+
+TrainingA <- TrainingmiRs
+TrainingB <- TrainingmiRs
+TrainingC <- TrainingmiRs
+TrainingD <- TrainingmiRs
+TrainingE <- TrainingmiRs
+TrainingF <- TrainingmiRs
+```
+
+```{r, cache=TRUE}
+#Recode each clustering so that the targeted cluster is "Target" and the others are controls, then split into training, interim and validation sets
+TrainingA$cluster6 <- dplyr::recode(TrainingA$cluster6, "A" = "TargetA", "B" = "Cont", 'C' = "Cont", "D" = "Cont", "E"="Cont", "F"="Cont") %>% as.factor(.) %>% droplevels(.)
+InterimA <- TrainingA %>% filter(PARTITION == "INTERIM") %>% select(-PARTITION)
+ValidationA <- TrainingA %>% filter(PARTITION == "VALIDATION") %>% select(-PARTITION)
+TrainingA <- TrainingA %>% filter(PARTITION == "TRAINING") %>% select(-PARTITION)
+
+TrainingB$cluster6 <- dplyr::recode(TrainingB$cluster6, "A" = "Cont", "B" = "TargetB", 'C' = "Cont", "D" = "Cont", "E"="Cont", "F"="Cont") %>% as.factor(.) %>% droplevels(.)
+InterimB <- TrainingB %>% filter(PARTITION == "INTERIM") %>% select(-PARTITION)
+ValidationB <- TrainingB %>% filter(PARTITION == "VALIDATION") %>% select(-PARTITION)
+TrainingB <- TrainingB %>% filter(PARTITION == "TRAINING") %>% select(-PARTITION)
+
+TrainingC$cluster6 <- dplyr::recode(TrainingC$cluster6, "A" = "Cont", "B" = "Cont", 'C' = "TargetC", "D" = "Cont", "E"="Cont", "F"="Cont") %>% as.factor(.) %>% droplevels(.)
+InterimC <- TrainingC %>% filter(PARTITION == "INTERIM") %>% select(-PARTITION)
+ValidationC <- TrainingC %>% filter(PARTITION == "VALIDATION") %>% select(-PARTITION)
+TrainingC <- TrainingC %>% filter(PARTITION == "TRAINING") %>% select(-PARTITION)
+
+TrainingD$cluster6 <- dplyr::recode(TrainingD$cluster6, "A" = "Cont", "B" = "Cont", 'C' = "Cont", "D" = "TargetD", "E"="Cont", "F"="Cont") %>% as.factor(.) %>% droplevels(.)
+InterimD <- TrainingD %>% filter(PARTITION == "INTERIM") %>% select(-PARTITION)
+ValidationD <- TrainingD %>% filter(PARTITION == "VALIDATION") %>% select(-PARTITION)
+TrainingD <- TrainingD %>% filter(PARTITION == "TRAINING") %>% select(-PARTITION)
+
+TrainingE$cluster6 <- dplyr::recode(TrainingE$cluster6, "A" = "Cont", "B" = "Cont", 'C' = "Cont", "D" = "Cont", "E"="TargetE", "F"="Cont") %>% as.factor(.) %>% droplevels(.)
+InterimE <- TrainingE %>% filter(PARTITION == "INTERIM") %>% select(-PARTITION)
+ValidationE <- TrainingE %>% filter(PARTITION == "VALIDATION") %>% select(-PARTITION)
+TrainingE <- TrainingE %>% filter(PARTITION == "TRAINING") %>% select(-PARTITION)
+
+TrainingF$cluster6 <- dplyr::recode(TrainingF$cluster6, "A" = "Cont", "B" = "Cont", 'C' = "Cont", "D" = "Cont", "E"="Cont", "F"="TargetF") %>% as.factor(.) %>% droplevels(.)
+InterimF <- TrainingF %>% filter(PARTITION == "INTERIM") %>% select(-PARTITION)
+ValidationF <- TrainingF %>% filter(PARTITION == "VALIDATION") %>% select(-PARTITION)
+TrainingF <- TrainingF %>% filter(PARTITION == "TRAINING") %>% select(-PARTITION)
+
+tuneLASSO <- expand.grid(
+  alpha = 0:1,
+  lambda = seq(0.0001, 1, length = 100)
+)
+
+control<- trainControl(method = 'repeatedcv',
+                       number = 10,
+                       repeats = 10,
+                       savePredictions = TRUE,
+                       classProbs = TRUE)
+
+#Create model weights for each cluster, depending on the breakdown within the clusters
+model_weightsA <- ifelse(TrainingA$cluster6 == "Cont",
+                        (1/table(TrainingA$cluster6)[1]) * 0.5,
+                        (1/table(TrainingA$cluster6)[2]) * 0.5)
+model_weightsB <- ifelse(TrainingB$cluster6 == "Cont",
+                        (1/table(TrainingB$cluster6)[1]) * 0.5,
+                        (1/table(TrainingB$cluster6)[2]) * 0.5)
+model_weightsC <- ifelse(TrainingC$cluster6 == "Cont",
+                        (1/table(TrainingC$cluster6)[1]) * 0.5,
+                        (1/table(TrainingC$cluster6)[2]) * 0.5)
+model_weightsD <- ifelse(TrainingD$cluster6 == "Cont",
+                        (1/table(TrainingD$cluster6)[1]) * 0.5,
+                        (1/table(TrainingD$cluster6)[2]) * 0.5)
+model_weightsE <- ifelse(TrainingE$cluster6 == "Cont",
+                        (1/table(TrainingE$cluster6)[1]) * 0.5,
+                        (1/table(TrainingE$cluster6)[2]) * 0.5)
+model_weightsF <- ifelse(TrainingF$cluster6 == "Cont",
+                        (1/table(TrainingF$cluster6)[1]) * 0.5,
+                        (1/table(TrainingF$cluster6)[2]) * 0.5)
+```
+
+
+
+# GLMNET
+
+## Cluster A
+
+```{r, warning = FALSE, cache=TRUE}
+fit.glmcvA <- cv.glmnet(x=as.matrix(select(TrainingA,-cluster6, -SampleID)), y=as.factor(TrainingA$cluster6), alpha=1, family='binomial', nfolds=10, type.measure = "deviance", weights = model_weightsA)
+
+tuneLASSO.1seA<- expand.grid(.alpha = 1, .lambda = fit.glmcvA$lambda.1se)
+set.seed(100)
+LASSO.Aa<- caret::train(cluster6 ~ ., data = select(TrainingA,-SampleID), method = "glmnet", trControl = control, family = 'binomial', tuneGrid = tuneLASSO.1seA, weights = model_weightsA, intercept = FALSE)
+
+lasso.coefA<- coef(LASSO.Aa$finalModel, LASSO.Aa$bestTune$lambda) %>% as.matrix() %>% as.data.frame() %>% rownames_to_column %>% filter(abs(s1) >0) %>% arrange(desc(s1)) %>% head(., n= 12)
+
+LASSO.A.data<- TrainingA[,colnames(TrainingA) %in% c("cluster6", lasso.coefA$rowname)]
+set.seed(100)
+LASSO.A<- caret::train(cluster6 ~ ., data = LASSO.A.data, method = "glmnet", trControl = control, family = 'binomial', tuneGrid = tuneLASSO.1seA, weights = model_weightsA, intercept = FALSE)
+
+#Report lambda value used
+paste("lamda 1se:", fit.glmcvA$lambda.1se)
+
+lasso.coefA<- coef(LASSO.A$finalModel, LASSO.A$bestTune$lambda) %>% as.matrix() %>% as.data.frame() %>% rownames_to_column(var = "miR") %>% filter(abs(s1) >0) %>% rename(clusterA = s1)
+
+kable(lasso.coefA, caption = "Cluster A") %>% kable_styling(full_width = TRUE)
+```
+
+```{r, warning = FALSE, message=FALSE, cache=TRUE}
+LASSO.split.A<- split(LASSO.A$pred, LASSO.A$pred$Resample)
+lapply(1:100, function(d) {
+  pROC::auc(pROC::roc(predictor = LASSO.split.A[[d]]$TargetA, response = LASSO.split.A[[d]]$obs))[1]
+}) %>% unlist() %>% hist(main = paste("Cluster A CV mean AUC:", signif(mean(.),3), "(SD:", signif(sd(.),3), ")"))
+
+```
+
+## Cluster B
+
+```{r, warning = FALSE, cache=TRUE}
+fit.glmcvB <- cv.glmnet(x=as.matrix(select(TrainingB,-cluster6, -SampleID)), y=as.factor(TrainingB$cluster6), alpha=1, family='binomial', nfolds=10, type.measure = "deviance", weights = model_weightsB, dfmax = 15)
+
+tuneLASSO.1seB<- expand.grid(.alpha = 1, .lambda = fit.glmcvB$lambda.1se)
+set.seed(100)
+LASSO.B<- caret::train(cluster6 ~ ., data = select(TrainingB,-SampleID), method = "glmnet", trControl = control, family = 'binomial', tuneGrid = tuneLASSO.1seB, weights = model_weightsB, intercept = FALSE)
+
+lasso.coefB<- coef(LASSO.B$finalModel, LASSO.B$bestTune$lambda) %>% as.matrix() %>% as.data.frame() %>% rownames_to_column %>% filter(abs(s1) >0) %>% arrange(desc(s1)) %>% head(., n= 15)
+
+LASSO.B.data<- TrainingB[,colnames(TrainingB) %in% c("cluster6", lasso.coefB$rowname)]
+set.seed(100)
+LASSO.B<- caret::train(cluster6 ~ ., data = LASSO.B.data, method = "glmnet", trControl = control, family = 'binomial', tuneGrid = tuneLASSO.1seB, weights = model_weightsB, intercept = FALSE)
+
+#Report lambda value used
+paste("lamda 1se:", fit.glmcvB$lambda.1se)
+
+lasso.coefB<- coef(LASSO.B$finalModel, LASSO.B$bestTune$lambda) %>% as.matrix() %>% as.data.frame() %>% rownames_to_column(var = "miR") %>% filter(abs(s1) >0) %>% rename(clusterB = s1)
+
+kable(lasso.coefB, caption = "clusterB") %>% kable_styling(full_width = TRUE)
+```
+
+```{r, warning = FALSE, message=FALSE, cache=TRUE}
+LASSO.split.B<- split(LASSO.B$pred, LASSO.B$pred$Resample)
+lapply(1:100, function(d) {
+  pROC::auc(pROC::roc(predictor = LASSO.split.B[[d]]$TargetB, response = LASSO.split.B[[d]]$obs))[1]
+}) %>% unlist() %>% hist(main = paste("cluster B CV mean AUC:", signif(mean(.),3), "(SD:", signif(sd(.),3), ")"))
+
+```
+
+## Cluster C
+
+```{r, warning = FALSE, cache=TRUE}
+fit.glmcvC <- cv.glmnet(x=as.matrix(select(TrainingC,-cluster6, -SampleID)), y=as.factor(TrainingC$cluster6), alpha=1, family='binomial', nfolds=10, type.measure = "deviance", weights = model_weightsC, dfmax = 12)
+
+tuneLASSO.1seC<- expand.grid(.alpha = 1, .lambda = fit.glmcvC$lambda.1se)
+set.seed(100)
+LASSO.C<- caret::train(cluster6 ~ ., data = select(TrainingC,-SampleID), method = "glmnet", trControl = control, family = 'binomial', tuneGrid = tuneLASSO.1seC, weights = model_weightsC, intercept = FALSE)
+
+lasso.coefC<- coef(LASSO.C$finalModel, LASSO.C$bestTune$lambda) %>% as.matrix() %>% as.data.frame() %>% rownames_to_column %>% filter(abs(s1) >0) %>% arrange(desc(s1)) %>% head(., n= 12)
+
+LASSO.C.data<- TrainingC[,colnames(TrainingC) %in% c("cluster6", lasso.coefC$rowname)]
+set.seed(100)
+LASSO.C<- caret::train(cluster6 ~ ., data = LASSO.C.data, method = "glmnet", trControl = control, family = 'binomial', tuneGrid = tuneLASSO.1seC, weights = model_weightsC, intercept = FALSE)
+
+#Report lambda value used
+paste("lamda 1se:", fit.glmcvC$lambda.1se)
+
+lasso.coefC<- coef(LASSO.C$finalModel, LASSO.C$bestTune$lambda) %>% as.matrix() %>% as.data.frame() %>% rownames_to_column(var = "miR") %>% filter(abs(s1) >0) %>% rename(clusterC = s1)
+
+kable(lasso.coefC, caption = "cluster C") %>% kable_styling(full_width = TRUE)
+```
+
+```{r, warning = FALSE, message=FALSE}
+LASSO.split.C<- split(LASSO.C$pred, LASSO.C$pred$Resample)
+lapply(1:100, function(d) {
+  pROC::auc(pROC::roc(predictor = LASSO.split.C[[d]]$TargetC, response = LASSO.split.C[[d]]$obs))[1]
+}) %>% unlist() %>% hist(main = paste("Cluster C CV mean AUC:", signif(mean(.),3), "(SD:", signif(sd(.),3), ")"))
+
+```
+
+## Cluster D
+
+```{r, warning = FALSE, cache=TRUE}
+
+fit.glmcvD <- cv.glmnet(x=as.matrix(select(TrainingD,-cluster6, -SampleID)), y=as.factor(TrainingD$cluster6), alpha=1, family='binomial', nfolds=10, type.measure = "deviance", weights = model_weightsD, dfmax = 12)
+
+tuneLASSO.1seD<- expand.grid(.alpha = 1, .lambda = fit.glmcvD$lambda.1se)
+set.seed(100)
+LASSO.D<- caret::train(cluster6 ~ ., data = select(TrainingD,-SampleID), method = "glmnet", trControl = control, family = 'binomial', tuneGrid = tuneLASSO.1seD, weights = model_weightsD, intercept = FALSE)
+
+lasso.coefD<- coef(LASSO.D$finalModel, LASSO.D$bestTune$lambda) %>% as.matrix() %>% as.data.frame() %>% rownames_to_column %>% filter(abs(s1) >0) %>% arrange(desc(s1)) %>% head(., n= 12)
+
+LASSO.D.data<- TrainingD[,colnames(TrainingD) %in% c("cluster6", lasso.coefD$rowname)]
+set.seed(100)
+LASSO.D<- caret::train(cluster6 ~ ., data = LASSO.D.data, method = "glmnet", trControl = control, family = 'binomial', tuneGrid = tuneLASSO.1seD, weights = model_weightsD, intercept = FALSE)
+
+#Report lambda value used
+paste("lamda 1se:", fit.glmcvD$lambda.1se)
+
+lasso.coefD<- coef(LASSO.D$finalModel, LASSO.D$bestTune$lambda) %>% as.matrix() %>% as.data.frame() %>% rownames_to_column(var = "miR") %>% filter(abs(s1) >0) %>% rename(clusterD = s1)
+
+kable(lasso.coefD, caption = "cluster D") %>% kable_styling(full_width = TRUE)
+```
+
+```{r, warning = FALSE, message=FALSE, cache=TRUE}
+LASSO.split.D<- split(LASSO.D$pred, LASSO.D$pred$Resample)
+lapply(1:100, function(d) {
+  pROC::auc(pROC::roc(predictor = LASSO.split.D[[d]]$TargetD, response = LASSO.split.D[[d]]$obs))[1]
+}) %>% unlist() %>% hist(main = paste("cluster D CV mean AUC:", signif(mean(.),3), "(SD:", signif(sd(.),3), ")"))
+
+```
+
+## Cluster E
+
+```{r, warning = FALSE, cache=TRUE}
+fit.glmcvE <- cv.glmnet(x=as.matrix(select(TrainingE,-cluster6, -SampleID)), y=as.factor(TrainingE$cluster6), alpha=1, family='binomial', nfolds=10, type.measure = "deviance", weights = model_weightsE, dfmax = 12)
+
+tuneLASSO.1seE<- expand.grid(.alpha = 1, .lambda = fit.glmcvE$lambda.1se)
+set.seed(100)
+LASSO.E<- caret::train(cluster6 ~ ., data = select(TrainingE,-SampleID), method = "glmnet", trControl = control, family = 'binomial', tuneGrid = tuneLASSO.1seE, weights = model_weightsE, intercept = FALSE)
+
+lasso.coefE<- coef(LASSO.E$finalModel, LASSO.E$bestTune$lambda) %>% as.matrix() %>% as.data.frame() %>% rownames_to_column %>% filter(abs(s1) >0) %>% arrange(desc(s1)) %>% head(., n= 12)
+
+LASSO.E.data<- TrainingE[,colnames(TrainingE) %in% c("cluster6", lasso.coefE$rowname)]
+set.seed(100)
+LASSO.E<- caret::train(cluster6 ~ ., data = LASSO.E.data, method = "glmnet", trControl = control, family = 'binomial', tuneGrid = tuneLASSO.1seE, weights = model_weightsE, intercept = FALSE)
+
+#Report lambda value used
+paste("lamda 1se:", fit.glmcvE$lambda.1se)
+
+lasso.coefE<- coef(LASSO.E$finalModel, LASSO.E$bestTune$lambda) %>% as.matrix() %>% as.data.frame() %>% rownames_to_column(var = "miR") %>% filter(abs(s1) >0) %>% rename(clusterE = s1)
+
+kable(lasso.coefE, caption = "cluster E") %>% kable_styling(full_width = TRUE)
+```
+
+```{r, warning = FALSE, message=FALSE, cache=TRUE}
+LASSO.split.E<- split(LASSO.E$pred, LASSO.E$pred$Resample)
+lapply(1:100, function(d) {
+  pROC::auc(pROC::roc(predictor = LASSO.split.E[[d]]$TargetE, response = LASSO.split.E[[d]]$obs))[1]
+}) %>% unlist() %>% hist(main = paste("cluster E CV mean AUC:", signif(mean(.),3), "(SD:", signif(sd(.),3), ")"))
+
+```
+
+## Cluster F
+
+```{r, warning = FALSE, cache=TRUE}
+fit.glmcvF <- cv.glmnet(x=as.matrix(select(TrainingF,-cluster6, -SampleID)), y=as.factor(TrainingF$cluster6), alpha=1, family='binomial', nfolds=10, type.measure = "deviance", weights = model_weightsF, dfmax = 15)
+
+tuneLASSO.1seF<- expand.grid(.alpha = 1, .lambda = fit.glmcvF$lambda.1se)
+set.seed(100)
+LASSO.F<- caret::train(cluster6 ~ ., data = select(TrainingF,-SampleID), method = "glmnet", trControl = control, family = 'binomial', tuneGrid = tuneLASSO.1seF, weights = model_weightsF, intercept = FALSE)
+
+lasso.coefF<- coef(LASSO.F$finalModel, LASSO.F$bestTune$lambda) %>% as.matrix() %>% as.data.frame() %>% rownames_to_column %>% filter(abs(s1) >0) %>% arrange(desc(s1)) %>% head(., n= 12)
+
+LASSO.F.data<- TrainingF[,colnames(TrainingF) %in% c("cluster6", lasso.coefF$rowname)]
+set.seed(100)
+LASSO.F<- caret::train(cluster6 ~ ., data = LASSO.F.data, method = "glmnet", trControl = control, family = 'binomial', tuneGrid = tuneLASSO.1seF, weights = model_weightsF, intercept = FALSE)
+
+#Report lambda value used
+paste("lamda 1se:", fit.glmcvF$lambda.1se)
+
+lasso.coefF<- coef(LASSO.F$finalModel, LASSO.F$bestTune$lambda) %>% as.matrix() %>% as.data.frame() %>% rownames_to_column(var = "miR") %>% filter(abs(s1) >0) %>% rename(clusterF = s1)
+
+kable(lasso.coefF, caption = "clusterF") %>% kable_styling(full_width = TRUE)
+```
+
+```{r, warning = FALSE, message=FALSE, cache=TRUE}
+LASSO.split.F<- split(LASSO.F$pred, LASSO.F$pred$Resample)
+lapply(1:100, function(d) {
+  pROC::auc(pROC::roc(predictor = LASSO.split.F[[d]]$TargetF, response = LASSO.split.F[[d]]$obs))[1]
+}) %>% unlist() %>% hist(main = paste("cluster F CV mean AUC:", signif(mean(.),3), "(SD:", signif(sd(.),3), ")"))
+
+```
+
+# Interim Results
+
+## Cluster A
+
+```{r}
+LASSO.predsA <- predict(LASSO.A, InterimA, type = "raw")
+LASSO.InterimA<- confusionMatrix(as.factor(LASSO.predsA), InterimA$cluster6, positive = "TargetA")
+LASSO.InterimA
+```
+
+```{r, message=FALSE}
+LASSO.probsA <- predict(LASSO.A, InterimA, type = "prob")
+LASSO.aucA<- pROC::auc(predictor = LASSO.probsA[,1], response = InterimA$cluster6)
+LASSO.CI.aucA<- pROC::ci.auc(predictor = LASSO.probsA[,1], response = InterimA$cluster6)
+LASSO.CI.aucA
+plot(pROC::roc(predictor = LASSO.probsA[,1], response = InterimA$cluster6), main = paste("Cluster A Interim AUC:", signif(LASSO.aucA,2)))
+```
+
+## Cluster B
+
+```{r}
+LASSO.predsB <- predict(LASSO.B, InterimB, type = "raw")
+LASSO.InterimB<- confusionMatrix(as.factor(LASSO.predsB), InterimB$cluster6, positive = "TargetB")
+LASSO.InterimB
+```
+
+```{r, message=FALSE}
+LASSO.probsB <- predict(LASSO.B, InterimB, type = "prob")
+LASSO.aucB<- pROC::auc(predictor = LASSO.probsB[,1], response = InterimB$cluster6)
+LASSO.CI.aucB<- pROC::ci.auc(predictor = LASSO.probsB[,1], response = InterimB$cluster6)
+LASSO.CI.aucB
+plot(pROC::roc(predictor = LASSO.probsB[,1], response = InterimB$cluster6), main = paste("Cluster B Interim AUC:", signif(LASSO.aucB,2)))
+```
+
+## Cluster C
+
+```{r}
+LASSO.predsC <- predict(LASSO.C, InterimC, type = "raw")
+LASSO.InterimC<- confusionMatrix(as.factor(LASSO.predsC), InterimC$cluster6, positive = "TargetC")
+LASSO.InterimC
+```
+
+```{r, message = FALSE}
+LASSO.probsC <- predict(LASSO.C, InterimC, type = "prob")
+LASSO.aucC<- pROC::auc(predictor = LASSO.probsC[,1], response = InterimC$cluster6)
+LASSO.CI.aucC<- pROC::ci.auc(predictor = LASSO.probsC[,1], response = InterimC$cluster6)
+LASSO.CI.aucC
+plot(pROC::roc(predictor = LASSO.probsC[,1], response = InterimC$cluster6), main = paste("Cluster C Interim AUC:", signif(LASSO.aucC,2)))
+```
+
+## Cluster D
+
+```{r}
+LASSO.predsD <- predict(LASSO.D, InterimD, type = "raw")
+LASSO.InterimD<- confusionMatrix(as.factor(LASSO.predsD), InterimD$cluster6, positive = "TargetD")
+LASSO.InterimD
+```
+
+```{r, message=FALSE}
+LASSO.probsD <- predict(LASSO.D, InterimD, type = "prob")
+LASSO.aucD<- pROC::auc(predictor = LASSO.probsD[,1], response = InterimD$cluster6)
+LASSO.CI.aucD<- pROC::ci.auc(predictor = LASSO.probsD[,1], response = InterimD$cluster6)
+LASSO.CI.aucD
+plot(pROC::roc(predictor = LASSO.probsD[,1], response = InterimD$cluster6), main = paste("Cluster D Interim AUC:", signif(LASSO.aucD,2)))
+```
+
+## Cluster E
+
+```{r}
+LASSO.predsE <- predict(LASSO.E, InterimE, type = "raw")
+LASSO.InterimE<- confusionMatrix(as.factor(LASSO.predsE), InterimE$cluster6, positive = "TargetE")
+LASSO.InterimE
+```
+
+```{r, message=FALSE}
+LASSO.probsE <- predict(LASSO.E, InterimE, type = "prob")
+LASSO.aucE<- pROC::auc(predictor = LASSO.probsE[,1], response = InterimE$cluster6)
+LASSO.CI.aucE<- pROC::ci.auc(predictor = LASSO.probsE[,1], response = InterimE$cluster6)
+LASSO.CI.aucE
+plot(pROC::roc(predictor = LASSO.probsE[,1], response = InterimE$cluster6), main = paste("Cluster E Interim AUC:", signif(LASSO.aucE,2)))
+```
+
+## Cluster F
+
+```{r}
+LASSO.predsF <- predict(LASSO.F, InterimF, type = "raw")
+LASSO.InterimF<- confusionMatrix(as.factor(LASSO.predsF), InterimF$cluster6, positive = "TargetF")
+LASSO.InterimF
+```
+
+```{r, message=FALSE}
+LASSO.probsF <- predict(LASSO.F, InterimF, type = "prob")
+LASSO.aucF<- pROC::auc(predictor = LASSO.probsF[,1], response = InterimF$cluster6)
+LASSO.CI.aucF<- pROC::ci.auc(predictor = LASSO.probsF[,1], response = InterimF$cluster6)
+LASSO.CI.aucF
+plot(pROC::roc(predictor = LASSO.probsF[,1], response = InterimF$cluster6), main = paste("Cluster F Interim AUC:", signif(LASSO.aucF,2)))
+```
+
+## AUCs
+
+```{r}
+kable(as.data.frame(rbind(`Cluster A` = signif(LASSO.CI.aucA, 3), `Cluster B` = signif(LASSO.CI.aucB, 3), `Cluster C` =  signif(LASSO.CI.aucC, 3), `Cluster D` = signif(LASSO.CI.aucD, 3), `Cluster E` = signif(LASSO.CI.aucE, 3), `Cluster F` = signif(LASSO.CI.aucF, 3))) %>% select(V2, V1,V3) %>% rename(AUC = V2, `Lower threshold 95% CI` = V1, `Upper threshold 95% CI` = V3), caption = "Interim set AUCs") %>% kable_styling(full_width = TRUE)
+```
+
+# Coefficients
+
+```{r}
+coefficients<- full_join(lasso.coefA, lasso.coefB, by = "miR") %>% full_join(., lasso.coefC, by = "miR") %>% full_join(., lasso.coefD, by = "miR") %>% full_join(., lasso.coefE, by = "miR") %>% full_join(., lasso.coefF, by = "miR")
+write_csv(coefficients, "LASSO.miR.Caret.coefficients.csv")
+
+kable(coefficients) %>% kable_styling(full_width = TRUE)
+```
+
+
+```{r}
+allcoefslong <- coefficients %>% pivot_longer(-c(miR), names_to = "Cluster", values_to = "Coefficient") %>% filter(Coefficient != 0) %>% arrange(desc(abs(Coefficient)))  %>% mutate(miR = gsub(x = miR, "\\.", "-")) %>%  mutate(miR=factor(miR, levels = unique(miR)))
+
+
+ggplot(allcoefslong, aes(x = miR, y = Coefficient, fill = Cluster)) + geom_col() + theme_minimal()+ theme(axis.text.x = element_text(angle = 90, vjust = 1, size = 12, hjust = 1)) + scale_fill_viridis(discrete=TRUE) + labs(x = "")
+```
+
+```{r}
+allcoefslong %>% mutate(miR = reorder_within(miR, -(abs(Coefficient)), Cluster)) %>% ggplot(aes(x=miR, y = Coefficient)) + geom_col(aes(fill=Cluster), show.legend = FALSE) + theme(axis.text.x=element_text(angle=90, vjust=0.5, size = 12), panel.background = element_blank(), panel.grid = element_line(colour="grey"), strip.text = element_text(size = 12)) + labs(x="", y="Coefficient", size=12) +  facet_wrap(~Cluster, scales = "free_x") + scale_x_reordered() + scale_fill_manual(name = "", values = c("deeppink", "dark red", "darksalmon", "yellow", "midnight blue", "cornflowerblue")) 
+```
+
+```{r}
+wide_miRs <- allcoefslong %>%  pivot_wider(., names_from = Cluster, values_from = Coefficient) %>%  mutate(Count = rowSums(is.na(.))) %>% arrange(Count, clusterA, clusterB, clusterC, clusterD, clusterE, clusterF)
+
+heatmapmiRs<- pivot_longer(wide_miRs, cols = c(clusterA, clusterB, clusterC, clusterD, clusterE, clusterF)) %>% filter(!is.na(value)) 
+
+heatmapmiRs <- heatmapmiRs %>% mutate(name = recode(name, "clusterA" = "Cluster A", "clusterB" = "Cluster B", "clusterC" = "Cluster C", "clusterD" = "Cluster D", "clusterE" = "Cluster E", "clusterF" = "Cluster F")) %>% mutate(name = factor(name, levels = c( "Cluster F", "Cluster E", "Cluster D", "Cluster C", "Cluster B", "Cluster A" )), miR = factor(miR, levels = wide_miRs$miR))
+
+heatmapmiRs  %>% ggplot(aes(x = reorder(miR, Count), y = name, fill = value)) + geom_tile() + theme(axis.text.x = element_text(angle = 90), panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"), axis.text = element_text(size = 14))  + labs(x = "", y = "") +   scale_fill_gradientn(colours = c("deeppink", "deeppink", "deeppink", "white", "midnightblue"), values = c(-1, 0, 1))
+
+```
+
+
+# Validation
+
+## Cluster A
+
+```{r, message = FALSE}
+LASSO.predsVA <- predict(LASSO.A, ValidationA, type = "raw")
+LASSO.probsVA <- predict(LASSO.A, ValidationA, type = "prob")
+colnames(LASSO.probsVA) <- c("ContA", "TargetA")
+kable(table(LASSO.predsVA))
+
+```
+
+## Cluster B
+
+```{r, message = FALSE}
+LASSO.predsVB <- predict(LASSO.B, ValidationB, type = "raw")
+LASSO.probsVB <- predict(LASSO.B, ValidationB, type = "prob")
+colnames(LASSO.probsVB) <- c("ContB", "TargetB")
+kable(table(LASSO.predsVB))
+
+```
+
+## Cluster C
+
+```{r, message = FALSE}
+LASSO.predsVC <- predict(LASSO.C, ValidationC, type = "raw")
+LASSO.probsVC <- predict(LASSO.C, ValidationC, type = "prob")
+colnames(LASSO.probsVC) <- c("ContC", "TargetC")
+kable(table(LASSO.predsVC))
+
+```
+
+## Cluster D
+
+```{r, message = FALSE}
+LASSO.predsVD <- predict(LASSO.D, ValidationD, type = "raw")
+LASSO.probsVD <- predict(LASSO.D, ValidationD, type = "prob")
+colnames(LASSO.probsVD) <- c("ContD", "TargetD")
+kable(table(LASSO.predsVD))
+
+```
+
+## Cluster E
+
+```{r, message = FALSE}
+LASSO.predsVE <- predict(LASSO.E, ValidationE, type = "raw")
+LASSO.probsVE <- predict(LASSO.E, ValidationE, type = "prob")
+colnames(LASSO.probsVE) <- c("ContE", "TargetE")
+kable(table(LASSO.predsVE))
+```
+
+## Cluster F
+
+```{r, message = FALSE}
+LASSO.predsVF <- predict(LASSO.F, ValidationF, type = "raw")
+LASSO.probsVF <- predict(LASSO.F, ValidationF, type = "prob")
+colnames(LASSO.probsVF) <- c("ContF", "TargetF")
+kable(table(LASSO.predsVF))
+```
+
+## Survival
+
+```{r}
+Validationprobs<- cbind(ValidationA$SampleID, LASSO.probsVA, LASSO.probsVB, LASSO.probsVC, LASSO.probsVD, LASSO.probsVE, LASSO.probsVF)
+colnames(Validationprobs)[1] <- "SampleID"
+
+Validationprobs <- Validationprobs %>% rowwise() %>% mutate(maxTarget = max(TargetA, TargetB, TargetC, TargetD, TargetE, TargetF))
+Valprobs <- Validationprobs %>% select(starts_with("Tar"))
+Validationprobs$MaxCluster<- colnames(Valprobs)[max.col(Valprobs)]
+table(Validationprobs$MaxCluster)
+```
+
+```{r}
+SurviveData <- read_excel("/Volumes/GoogleDrive/My Drive/Actelion/UsingUpdatedDANA/miRNA clustering/Survival.xlsx")
+Valdata <- left_join(Validationprobs, SurviveData, by = "SampleID") %>% left_join(., Clusterpheno, by = "SampleID")
+
+Bases<- survival::Surv(time = Valdata$DaysToEvent, event = Valdata$Survivor)
+Bases1<- survival::Surv(time = Valdata$DaysToEvent1yr, event = Valdata$Survivor1yr)
+Bases3<- survival::Surv(time = Valdata$DaysToEvent3yr, event = Valdata$Survivor3yr)
+Bases5<- survival::Surv(time = Valdata$DaysToEvent5yr, event = Valdata$Survivor5yr)
+Bases10<- survival::Surv(time = Valdata$DaysToEvent10yr, event = Valdata$Survivor10yr)
+
+survminer::ggsurvplot(
+    fit = survival::survfit(Bases ~ MaxCluster, data = Valdata), 
+    xlab = "Years", 
+    ylab = "Overall survival probability",
+    legend.title = "",
+    palette=c("deeppink","dark red", "darksalmon", "yellow", "midnight blue", "cornflowerblue"),
+    risk.table = TRUE,  risk.table.height = 0.25, xscale = "d_y", break.time.by=365.25*2.5)
+
+broom::tidy(coxph(Bases~sex+age+MaxCluster, data = Valdata), exp = TRUE) %>% kable(., caption = "Cox regression: ~ sex + age + 6 clusters") %>% kable_styling(full_width = TRUE)
+coxph(Bases~sex+age+MaxCluster, data = Valdata) %>% gtsummary::tbl_regression(exp = TRUE)
+
+broom::tidy(coxph(Bases~MaxCluster, data = Valdata), exp = TRUE) %>% kable(., caption = "Cox regression: ~ 6 clusters") %>% kable_styling(full_width = TRUE)
+coxph(Bases~MaxCluster, data = Valdata) %>% gtsummary::tbl_regression(exp = TRUE)
+
+ggforest(coxph(Bases~sex+age+MaxCluster, data = Valdata))
+
+```
+
+### 10 year survival
+
+```{r}
+survminer::ggsurvplot(
+    fit = survival::survfit(Bases10 ~ MaxCluster, data = Valdata), 
+    xlab = "Years", 
+    ylab = "Overall survival probability",
+    legend.title = "",
+    palette=c("deeppink","dark red", "darksalmon", "yellow", "midnight blue", "cornflowerblue"),
+    risk.table = TRUE,  risk.table.height = 0.25, xscale = "d_y", break.time.by=365.25*2.5)
+
+
+broom::tidy(coxph(Bases10~sex+age+MaxCluster, data = Valdata), exp = TRUE) %>% kable(., caption = "Cox regression: ~ sex + age + 6 clusters") %>% kable_styling(full_width = TRUE)
+coxph(Bases10~sex+age+MaxCluster, data = Valdata) %>% gtsummary::tbl_regression(exp = TRUE)
+
+broom::tidy(coxph(Bases10~MaxCluster, data = Valdata), exp = TRUE) %>% kable(., caption = "Cox regression: ~ 6 clusters") %>% kable_styling(full_width = TRUE)
+coxph(Bases10~MaxCluster, data = Valdata) %>% gtsummary::tbl_regression(exp = TRUE)
+
+ggforest(coxph(Bases10~sex+age+MaxCluster, data = Valdata))
+```
+
+### 5 year survival
+
+```{r}
+survminer::ggsurvplot(
+    fit = survival::survfit(Bases5 ~ MaxCluster, data = Valdata), 
+    xlab = "Years", 
+    ylab = "Overall survival probability",
+    legend.title = "",
+    palette=c("deeppink","dark red", "darksalmon", "yellow", "midnight blue", "cornflowerblue"),
+    risk.table = TRUE,  risk.table.height = 0.25, xscale = "d_y", break.time.by=365.25*2.5)
+
+
+broom::tidy(coxph(Bases5~sex+age+MaxCluster, data = Valdata), exp = TRUE) %>% kable(., caption = "Cox regression: ~ sex + age + 6 clusters") %>% kable_styling(full_width = TRUE)
+coxph(Bases5~sex+age+MaxCluster, data = Valdata) %>% gtsummary::tbl_regression(exp = TRUE)
+
+broom::tidy(coxph(Bases5~MaxCluster, data = Valdata), exp = TRUE) %>% kable(., caption = "Cox regression: ~ 6 clusters") %>% kable_styling(full_width = TRUE)
+coxph(Bases5~MaxCluster, data = Valdata) %>% gtsummary::tbl_regression(exp = TRUE)
+
+ggforest(coxph(Bases5~sex+age+MaxCluster, data = Valdata))
+```
+
+### 3 year survival
+
+```{r}
+survminer::ggsurvplot(
+    fit = survival::survfit(Bases3 ~ MaxCluster, data = Valdata), 
+    xlab = "Years", 
+    ylab = "Overall survival probability",
+    legend.title = "",
+    palette=c("deeppink","dark red", "darksalmon", "yellow", "midnight blue", "cornflowerblue"),
+    risk.table = TRUE,  risk.table.height = 0.25, xscale = "d_y", break.time.by=365.25*2.5)
+
+
+broom::tidy(coxph(Bases3~sex+age+MaxCluster, data = Valdata), exp = TRUE) %>% kable(., caption = "Cox regression: ~ sex + age + 6 clusters") %>% kable_styling(full_width = TRUE)
+coxph(Bases3~sex+age+MaxCluster, data = Valdata) %>% gtsummary::tbl_regression(exp = TRUE)
+
+broom::tidy(coxph(Bases3~MaxCluster, data = Valdata), exp = TRUE) %>% kable(., caption = "Cox regression: ~ 6 clusters") %>% kable_styling(full_width = TRUE)
+coxph(Bases3~MaxCluster, data = Valdata) %>% gtsummary::tbl_regression(exp = TRUE)
+
+ggforest(coxph(Bases3~sex+age+MaxCluster, data = Valdata))
+```
+
+### 1 year survival
+
+```{r}
+survminer::ggsurvplot(
+    fit = survival::survfit(Bases1 ~ MaxCluster, data = Valdata), 
+    xlab = "Years", 
+    ylab = "Overall survival probability",
+    legend.title = "",
+    palette=c("deeppink","dark red", "darksalmon", "yellow", "midnight blue", "cornflowerblue"))
+
+
+broom::tidy(coxph(Bases1~sex+age+MaxCluster, data = Valdata), exp = TRUE) %>% kable(., caption = "Cox regression: ~ sex + age + 6 clusters") %>% kable_styling(full_width = TRUE)
+coxph(Bases1~sex+age+MaxCluster, data = Valdata) %>% gtsummary::tbl_regression(exp = TRUE)
+
+broom::tidy(coxph(Bases1~MaxCluster, data = Valdata), exp = TRUE) %>% kable(., caption = "Cox regression: ~ 6 clusters") %>% kable_styling(full_width = TRUE)
+coxph(Bases1~MaxCluster, data = Valdata) %>% gtsummary::tbl_regression(exp = TRUE)
+
+ggforest(coxph(Bases1~sex+age+MaxCluster, data = Valdata))
+```
+
+## Clinical Associations 
+
+```{r}
+clusterfills<- c("deeppink", "dark red", "darksalmon", "yellow", "midnight blue", "cornflowerblue")
+
+as.data.frame(table(Valdata$dana1, Valdata$MaxCluster))  %>% group_by(Var2, Var1) %>% ggplot(aes(x=Var2, y=Freq, fill=Var1)) + geom_bar(stat="identity")  + scale_fill_manual(values = c("deeppink", "cornflowerblue", "midnightblue")) + ggtitle("PH Status, 6 Clusters, Validation set") + labs(x = "Cluster", y = "") +  guides(fill=guide_legend(title=NULL)) + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey")) +  guides(fill=guide_legend(title=NULL))
+
+fisher.test(table(Valdata$dana1, Valdata$MaxCluster), conf.level = 0.95, simulate.p.value=TRUE)
+```
+
+### Clinical parameters with significant differences between clusters in D+I
+
+```{r}
+Valdata %>% select(MaxCluster, ntprobnp) %>% ggplot(aes(x= MaxCluster, y = ntprobnp)) + geom_boxplot(fill=clusterfills) + labs(x = "Cluster", y = "log2 NT-proBNP") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+ntprobnp6<- kruskal.test(ntprobnp ~ MaxCluster, data = Valdata)
+ntprobnp6
+dunn.test(Valdata$ntprobnp, Valdata$MaxCluster, method = "BH")
+```
+
+```{r}
+Valdata %>% select(MaxCluster, SvO2) %>% filter(!is.na(SvO2)) %>% ggplot(aes(x= MaxCluster, y =SvO2)) + geom_boxplot(fill=clusterfills) + labs(x = "Cluster", y = "SvO2") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+svo26<- kruskal.test(log(SvO2) ~ MaxCluster, data = Valdata)
+svo26
+dunn.test(log(Valdata$SvO2), Valdata$MaxCluster, method = "BH")
+```
+
+```{r}
+Valdata %>% select(MaxCluster, PVRdynes) %>% filter(!is.na(PVRdynes)) %>% ggplot(aes(x= MaxCluster, y =PVRdynes)) + geom_boxplot(fill=clusterfills) + labs(x = "Cluster", y = "PVR (Dynes)") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+pvr6<- kruskal.test(log(PVRdynes) ~ MaxCluster, data = Valdata)
+pvr6
+dunn.test(log(Valdata$PVRdynes), Valdata$MaxCluster, method = "BH")
+```
+
+```{r}
+Valdata %>% select(MaxCluster, dPAP) %>% filter(!is.na(dPAP)) %>% ggplot(aes(x= MaxCluster, y =dPAP)) + geom_boxplot(fill=clusterfills) + labs(x = "Cluster", y = "dPAP (mm Hg)") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+dpap6<- kruskal.test(log(dPAP) ~ MaxCluster, data = Valdata)
+dpap6
+dunn.test(log(Valdata$dPAP), Valdata$MaxCluster, method = "BH")
+```
+
+```{r}
+Valdata %>% select(MaxCluster, mPAP) %>% filter(!is.na(mPAP)) %>% ggplot(aes(x= MaxCluster, y =mPAP)) + geom_boxplot(fill=clusterfills) + labs(x = "Cluster", y = "mPAP (mm Hg)") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+mpap6<- kruskal.test(log(mPAP) ~ MaxCluster, data = Valdata)
+mpap6
+dunn.test(log(Valdata$mPAP), Valdata$MaxCluster, method = "BH")
+```
+
+```{r}
+Valdata %>% select(MaxCluster, mRAP) %>% filter(!is.na(mRAP)) %>% ggplot(aes(x= MaxCluster, y =mRAP)) + geom_boxplot(fill=clusterfills) + labs(x = "Cluster", y = "mRAP (mm Hg)") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+mRAP6<- kruskal.test(log(mRAP) ~ MaxCluster, data = Valdata)
+mRAP6
+dunn.test(log(Valdata$mRAP), Valdata$MaxCluster, method = "BH")
+```
+
+```{r}
+Valdata %>% select(MaxCluster, sPAP) %>% filter(!is.na(sPAP)) %>% ggplot(aes(x= MaxCluster, y =sPAP)) + geom_boxplot(fill=clusterfills) + labs(x = "Cluster", y = "sPAP (mm Hg)") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+spap6<- kruskal.test(log(sPAP) ~ MaxCluster, data = Valdata)
+spap6
+dunn.test(log(Valdata$sPAP), Valdata$MaxCluster, method = "BH")
+```
+
+```{r}
+Valdata %>% filter(!is.na(smwd)) %>% group_by(MaxCluster) %>% summarise(Shapiro.pvalue = shapiro.test(smwd)$p.value, Variance = var(smwd), Mean = mean(smwd), logVariance = var(log(smwd)), logmean = mean(log(smwd)), Median = median(smwd), IQR = IQR(smwd)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+smwd6<- kruskal.test(log(smwd) ~ MaxCluster, data = Valdata)
+smwd6
+dunn.test(log(Valdata$smwd), Valdata$MaxCluster, method = "BH")
+```
+
+```{r}
+treatment6<- chisq.test(table(Valdata$treated, Valdata$MaxCluster))
+treatment6
+as.data.frame(table(Valdata$MaxCluster, Valdata$treated)) %>% ggplot(aes(x = Var1, y = Freq, fill = Var2)) + geom_bar(stat = "identity") + scale_fill_manual(values = c("tomato2","dark red")) + ggtitle("Treated") + labs(x = "Cluster", y = "") + guides(fill=guide_legend(title=NULL))
+```
+
+```{r}
+site6<- fisher.test(table(Valdata$site, Valdata$MaxCluster), conf.level = 0.95, simulate.p.value=TRUE)
+site6
+
+as.data.frame(table(Valdata$MaxCluster, Valdata$site)) %>% ggplot(aes(x = Var1, y = Freq, fill = Var2)) + geom_bar(stat = "identity") + scale_fill_manual(values = c("deeppink","cornflowerblue", "midnight blue")) + ggtitle("Site") + labs(x = "Cluster", y = "") + guides(fill=guide_legend(title=NULL))
+```
+
+```{r}
+Valdata %>% select(MaxCluster, Creatinine) %>% filter(!is.na(Creatinine)) %>% ggplot(aes(x= MaxCluster, y =Creatinine)) + geom_boxplot(fill=clusterfills) + labs(x = "Cluster", y = "Creatinine") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+Creat6<- kruskal.test(log(Creatinine) ~ MaxCluster, data = Valdata)
+Creat6
+dunn.test(log(Valdata$Creatinine), Valdata$MaxCluster, method = "BH")
+```
+
+```{r}
+Valdata %>% select(MaxCluster, eGFR) %>% filter(!is.na(eGFR)) %>% ggplot(aes(x= MaxCluster, y =eGFR)) + geom_boxplot(fill=clusterfills) + labs(x = "Cluster", y = "eGFR") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+egfr6<- kruskal.test(log(eGFR) ~ MaxCluster, data = Valdata)
+egfr6
+dunn.test(log(Valdata$eGFR), Valdata$MaxCluster, method = "BH")
+```
+
+```{r}
+Valdata  %>% select(MaxCluster, ua) %>% ggplot(aes(x= MaxCluster, y = ua)) + geom_boxplot(fill=clusterfills) + labs(x = "Cluster", y = "Uric Acid") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+ua6<- kruskal.test(ua ~ MaxCluster, data = Valdata)
+ua6
+```
+
+
+```{r, include=FALSE, cache = FALSE}
+save.image("miRs6ClustersCaret.RData")
+#load("miRs6ClustersCaret.RData")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
