@@ -1,5 +1,5 @@
 ---
-title: "PH1"
+title: "PH1 unsupervised clusters"
 author: "Niamh Errington"
 date: "`r format(Sys.time(), '%d %B %Y')`" 
 output: 
