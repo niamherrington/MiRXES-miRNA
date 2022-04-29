@@ -1,0 +1,327 @@
+---
+title: "Singular PH clusterings, 2 clusters"
+author: "Niamh Errington"
+date: "`r format(Sys.time(), '%d %B %Y')`" 
+output: 
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+    toc_collapsed: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(kableExtra)
+```
+
+```{r, message=FALSE}
+library(glmnet)
+library(caret)
+library(tidyverse)
+```
+
+```{r, message=FALSE, warning=FALSE}
+TrainA <- read_csv("ClusterphenoPH1.csv") %>% select(SampleID, PARTITION, PH1_k2, starts_with("hsa"))
+TrainB <- read_csv("ClusterphenoPH2.csv") %>% select(SampleID, PARTITION, PH2_k2, starts_with("hsa"))
+TrainC <- read_csv("ClusterphenoPH3.csv") %>% select(SampleID, PARTITION, PH3_k2, starts_with("hsa"))
+TrainD <- read_csv("ClusterphenoPH4.csv") %>% select(SampleID, PARTITION, PH4_k2, starts_with("hsa"))
+TrainE <- read_csv("ClusterphenoPH5.csv") %>% select(SampleID, PARTITION, PH5_k2, starts_with("hsa"))
+```
+
+```{r}
+addmargins(table(TrainA$PH1_k2, TrainA$PARTITION)) %>% kable(., caption = "PH1") %>% kable_styling(full_width = TRUE)
+addmargins(table(TrainB$PH2_k2, TrainB$PARTITION)) %>% kable(., caption = "PH2") %>% kable_styling(full_width = TRUE)
+addmargins(table(TrainC$PH3_k2, TrainC$PARTITION)) %>% kable(., caption = "PH3") %>% kable_styling(full_width = TRUE)
+addmargins(table(TrainD$PH4_k2, TrainD$PARTITION)) %>% kable(., caption = "PH4") %>% kable_styling(full_width = TRUE)
+addmargins(table(TrainE$PH5_k2, TrainE$PARTITION)) %>% kable(., caption = "PH5") %>% kable_styling(full_width = TRUE)
+```
+
+```{r}
+TrainA$PH1_k2 <- dplyr::recode(TrainA$PH1_k2, "A" = "TargetA", "B" = "Cont") %>% as.factor(.) %>% droplevels(.)
+InterimA <- TrainA %>% filter(PARTITION == "INTERIM") %>% select(-PARTITION)
+TrainingA <- TrainA %>% filter(PARTITION == "TRAINING") %>% select(-PARTITION)
+
+TrainB$PH2_k2 <- dplyr::recode(TrainB$PH2_k2, "A" = "TargetA", "B" = "Cont") %>% as.factor(.) %>% droplevels(.)
+InterimB <- TrainB %>% filter(PARTITION == "INTERIM") %>% select(-PARTITION)
+TrainingB <- TrainB %>% filter(PARTITION == "TRAINING") %>% select(-PARTITION)
+
+TrainC$PH3_k2 <- dplyr::recode(TrainC$PH3_k2, "A" = "TargetA", "B" = "Cont") %>% as.factor(.) %>% droplevels(.)
+InterimC <- TrainC %>% filter(PARTITION == "INTERIM") %>% select(-PARTITION)
+TrainingC <- TrainC %>% filter(PARTITION == "TRAINING") %>% select(-PARTITION)
+
+TrainD$PH4_k2 <- dplyr::recode(TrainD$PH4_k2, "A" = "TargetA", "B" = "Cont") %>% as.factor(.) %>% droplevels(.)
+InterimD <- TrainD %>% filter(PARTITION == "INTERIM") %>% select(-PARTITION)
+TrainingD <- TrainD %>% filter(PARTITION == "TRAINING") %>% select(-PARTITION)
+
+TrainE$PH5_k2 <- dplyr::recode(TrainE$PH5_k2, "A" = "TargetA", "B" = "Cont") %>% as.factor(.) %>% droplevels(.)
+InterimE <- TrainE %>% filter(PARTITION == "INTERIM") %>% select(-PARTITION)
+TrainingE <- TrainE %>% filter(PARTITION == "TRAINING") %>% select(-PARTITION)
+
+
+tuneLASSO <- expand.grid(
+  alpha = 0:1,
+  lambda = seq(0.0001, 1, length = 100)
+)
+
+control<- trainControl(method = 'repeatedcv',
+                       number = 10,
+                       repeats = 10,
+                       savePredictions = TRUE,
+                       classProbs = TRUE)
+
+model_weightsA <- ifelse(TrainingA$PH1_k2 == "Cont",
+                        (1/table(TrainingA$PH1_k2)[1]) * 0.5,
+                        (1/table(TrainingA$PH1_k2)[2]) * 0.5)
+model_weightsB <- ifelse(TrainingB$PH2_k2 == "Cont",
+                        (1/table(TrainingB$PH2_k2)[1]) * 0.5,
+                        (1/table(TrainingB$PH2_k2)[2]) * 0.5)
+model_weightsC <- ifelse(TrainingC$PH3_k2 == "Cont",
+                        (1/table(TrainingC$PH3_k2)[1]) * 0.5,
+                        (1/table(TrainingC$PH3_k2)[2]) * 0.5)
+model_weightsD <- ifelse(TrainingD$PH4_k2 == "Cont",
+                        (1/table(TrainingD$PH4_k2)[1]) * 0.5,
+                        (1/table(TrainingD$PH4_k2)[2]) * 0.5)
+model_weightsE <- ifelse(TrainingE$PH5_k2 == "Cont",
+                        (1/table(TrainingE$PH5_k2)[1]) * 0.5,
+                        (1/table(TrainingE$PH5_k2)[2]) * 0.5)
+```
+
+
+# GLMNET
+
+## PH1
+
+```{r}
+x <- model.matrix(PH1_k2 ~ ., select(TrainingA,-SampleID))
+fit.glmcvA <- cv.glmnet(x=x, y=as.factor(TrainingA$PH1_k2), alpha=1, family='binomial', nfolds=10, type.measure = "deviance", weights = model_weightsA, dfmax = 12)
+summary(fit.glmcvA)
+other.glmcvA <- cv.glmnet(x=x, y=as.factor(TrainingA$PH1_k2), alpha=1, family='binomial', nfolds=10, type.measure = "class", weights = model_weightsA, dfmax = 12)
+summary(other.glmcvA)
+
+plot(fit.glmcvA, cex.axis=1.5, cex.lab=1.5,cex.main=1.5)
+plot(other.glmcvA, cex.axis=1, cex.lab=1, cex.main=1)
+
+glmodA<- glmnet(x = x, y = as.factor(TrainingA$PH1_k2), family = "binomial", alpha = 1, lambda = other.glmcvA$lambda.min, intercept = FALSE, weights = model_weightsA) 
+glmodA
+
+lasso.coefA<- coef(glmodA) %>% as.matrix() %>% as.data.frame() %>% filter(abs(s0) >0) %>% rownames_to_column(var = "miR") %>% rename(PH1 = s0)
+kable(lasso.coefA, caption = "PH1") %>% kable_styling(full_width = TRUE)
+```
+
+## PH2
+
+```{r}
+x <- model.matrix(PH2_k2 ~ ., select(TrainingB,-SampleID))
+fit.glmcvB <- cv.glmnet(x=x, y=as.factor(TrainingB$PH2_k2), alpha=1, family='binomial', nfolds=10, type.measure = "deviance", weights = model_weightsB, dfmax = 12)
+summary(fit.glmcvB)
+other.glmcvB <- cv.glmnet(x=x, y=as.factor(TrainingB$PH2_k2), alpha=1, family='binomial', nfolds=10, type.measure = "class", weights = model_weightsB, dfmax = 12)
+summary(other.glmcvB)
+
+plot(fit.glmcvB, cex.axis=1.5, cex.lab=1.5,cex.main=1.5)
+plot(other.glmcvB, cex.axis=1, cex.lab=1, cex.main=1)
+
+glmodB<- glmnet(x = x, y = as.factor(TrainingB$PH2_k2), family = "binomial", alpha = 1, lambda = other.glmcvB$lambda.min, intercept = FALSE, weights = model_weightsB) 
+glmodB
+
+lasso.coefB<- coef(glmodB) %>% as.matrix() %>% as.data.frame() %>% filter(abs(s0) >0) %>% rownames_to_column(var = "miR") %>% rename(PH2 = s0)
+kable(lasso.coefB, caption = "PH2") %>% kable_styling(full_width = TRUE)
+```
+
+## PH3
+
+```{r}
+x <- model.matrix(PH3_k2 ~ ., select(TrainingC,-SampleID))
+fit.glmcvC <- cv.glmnet(x=x, y=as.factor(TrainingC$PH3_k2), alpha=1, family='binomial', nfolds=10, type.measure = "deviance", weights = model_weightsC, dfmax = 12)
+summary(fit.glmcvC)
+other.glmcvC <- cv.glmnet(x=x, y=as.factor(TrainingC$PH3_k2), alpha=1, family='binomial', nfolds=10, type.measure = "class", weights = model_weightsC, dfmax = 12)
+summary(other.glmcvC)
+
+plot(fit.glmcvC, cex.axis=1.5, cex.lab=1.5,cex.main=1.5)
+plot(other.glmcvC, cex.axis=1, cex.lab=1, cex.main=1)
+
+glmodC<- glmnet(x = x, y = as.factor(TrainingC$PH3_k2), family = "binomial", alpha = 1, lambda = other.glmcvC$lambda.min, intercept = FALSE, weights = model_weightsC) 
+glmodC
+
+lasso.coefC<- coef(glmodC) %>% as.matrix() %>% as.data.frame() %>% filter(abs(s0) >0) %>% rownames_to_column(var = "miR") %>% rename(PH3 = s0)
+kable(lasso.coefC,  caption = "PH3") %>% kable_styling(full_width = TRUE)
+```
+
+## PH4
+
+```{r}
+x <- model.matrix(PH4_k2 ~ ., select(TrainingD,-SampleID))
+fit.glmcvD <- cv.glmnet(x=x, y=as.factor(TrainingD$PH4_k2), alpha=1, family='binomial', nfolds=10, type.measure = "deviance", weights = model_weightsD, dfmax = 12)
+summary(fit.glmcvD)
+other.glmcvD <- cv.glmnet(x=x, y=as.factor(TrainingD$PH4_k2), alpha=1, family='binomial', nfolds=10, type.measure = "class", weights = model_weightsD, dfmax = 12)
+summary(other.glmcvD)
+
+plot(fit.glmcvD, cex.axis=1.5, cex.lab=1.5,cex.main=1.5)
+plot(other.glmcvD, cex.axis=1, cex.lab=1, cex.main=1)
+
+glmodD<- glmnet(x = x, y = as.factor(TrainingD$PH4_k2), family = "binomial", alpha = 1, lambda = other.glmcvD$lambda.min, intercept = FALSE, weights = model_weightsD) 
+glmodD
+
+lasso.coefD<- coef(glmodD) %>% as.matrix() %>% as.data.frame() %>% filter(abs(s0) >0) %>% rownames_to_column(var = "miR") %>% rename(PH4 = s0)
+kable(lasso.coefD, caption = "PH4") %>% kable_styling(full_width = TRUE)
+```
+
+## PH5
+
+```{r}
+x <- model.matrix(PH5_k2 ~ ., select(TrainingE,-SampleID))
+fit.glmcvE <- cv.glmnet(x=x, y=as.factor(TrainingE$PH5_k2), alpha=1, family='binomial', nfolds=10, type.measure = "deviance", weights = model_weightsE, dfmax = 12)
+summary(fit.glmcvE)
+other.glmcvE <- cv.glmnet(x=x, y=as.factor(TrainingE$PH5_k2), alpha=1, family='binomial', nfolds=10, type.measure = "class", weights = model_weightsE, dfmax = 12)
+summary(other.glmcvE)
+
+plot(fit.glmcvE, cex.axis=1.5, cex.lab=1.5,cex.main=1.5)
+plot(other.glmcvE, cex.axis=1, cex.lab=1, cex.main=1)
+
+glmodE<- glmnet(x = x, y = as.factor(TrainingE$PH5_k2), family = "binomial", alpha = 1, lambda = other.glmcvE$lambda.min, intercept = FALSE, weights = model_weightsE) 
+glmodE
+
+lasso.coefE<- coef(glmodE) %>% as.matrix() %>% as.data.frame() %>% filter(abs(s0) >0) %>% rownames_to_column(var = "miR") %>% rename(PH5 = s0)
+kable(lasso.coefE, caption = "PH5") %>% kable_styling(full_width = TRUE)
+```
+
+
+# Interim Results
+
+## PH1
+
+```{r}
+LASSO.intdataA <- model.matrix(PH1_k2 ~ ., select(InterimA,-SampleID))
+LASSO.predsA <- predict(glmodA, LASSO.intdataA, type = "class")
+LASSO.InterimA<- confusionMatrix(as.factor(LASSO.predsA), InterimA$PH1_k2, positive = "TargetA")
+LASSO.InterimA
+```
+
+```{r, message=FALSE}
+LASSO.probsA <- predict(glmodA, LASSO.intdataA, type = "response")
+LASSO.aucA<- pROC::auc(predictor = LASSO.probsA[,1], response = InterimA$PH1_k2)
+LASSO.CI.aucA<- pROC::ci.auc(predictor = LASSO.probsA[,1], response = InterimA$PH1_k2)
+LASSO.CI.aucA
+plot(pROC::roc(predictor = LASSO.probsA[,1], response = InterimA$PH1_k2), main = paste("Cluster A Interim AUC:", round(LASSO.aucA,2)))
+```
+
+## PH2
+
+```{r}
+LASSO.intdataB <- model.matrix(PH2_k2 ~ ., select(InterimB,-SampleID))
+LASSO.predsB <- predict(glmodB, LASSO.intdataB, type = "class")
+LASSO.InterimB<- confusionMatrix(as.factor(LASSO.predsB), InterimB$PH2_k2, positive = "TargetA")
+LASSO.InterimB
+```
+
+```{r, message=FALSE}
+LASSO.probsB <- predict(glmodB, LASSO.intdataB, type = "response")
+LASSO.aucB<- pROC::auc(predictor = LASSO.probsB[,1], response = InterimB$PH2_k2)
+LASSO.CI.aucB<- pROC::ci.auc(predictor = LASSO.probsB[,1], response = InterimB$PH2_k2)
+LASSO.CI.aucB
+plot(pROC::roc(predictor = LASSO.probsB[,1], response = InterimB$PH2_k2), main = paste("Cluster B Interim AUC:", round(LASSO.aucB,2)))
+```
+
+## PH3
+
+```{r}
+LASSO.intdataC <- model.matrix(PH3_k2 ~ ., select(InterimC,-SampleID))
+LASSO.predsC <- predict(glmodC, LASSO.intdataC, type = "class")
+LASSO.InterimC<- confusionMatrix(as.factor(LASSO.predsC), InterimC$PH3_k2, positive = "TargetA")
+LASSO.InterimC
+```
+
+```{r, message = FALSE}
+LASSO.probsC <- predict(glmodC, LASSO.intdataC, type = "response")
+LASSO.aucC<- pROC::auc(predictor = LASSO.probsC[,1], response = InterimC$PH3_k2)
+LASSO.CI.aucC<- pROC::ci.auc(predictor = LASSO.probsC[,1], response = InterimC$PH3_k2)
+LASSO.CI.aucC
+plot(pROC::roc(predictor = LASSO.probsC[,1], response = InterimC$PH3_k2), main = paste("Cluster C Interim AUC:", round(LASSO.aucC,2)))
+```
+
+## PH4
+
+```{r}
+LASSO.intdataD <- model.matrix(PH4_k2 ~ ., select(InterimD,-SampleID))
+LASSO.predsD <- predict(glmodD, LASSO.intdataD, type = "class")
+LASSO.InterimD<- confusionMatrix(as.factor(LASSO.predsD), InterimD$PH4_k2, positive = "TargetA")
+LASSO.InterimD
+```
+
+```{r, message=FALSE}
+LASSO.probsD <- predict(glmodD, LASSO.intdataD, type = "response")
+LASSO.aucD<- pROC::auc(predictor = LASSO.probsD[,1], response = InterimD$PH4_k2)
+LASSO.CI.aucD<- pROC::ci.auc(predictor = LASSO.probsD[,1], response = InterimD$PH4_k2)
+LASSO.CI.aucD
+plot(pROC::roc(predictor = LASSO.probsD[,1], response = InterimD$PH4_k2), main = paste("Cluster D Interim AUC:", round(LASSO.aucD,2)))
+```
+
+## PH5
+
+```{r}
+LASSO.intdataE <- model.matrix(PH5_k2 ~ ., select(InterimE,-SampleID))
+LASSO.predsE <- predict(glmodE, LASSO.intdataE, type = "class")
+LASSO.InterimE<- confusionMatrix(as.factor(LASSO.predsE), InterimE$PH5_k2, positive = "TargetA")
+LASSO.InterimE
+```
+
+```{r, message=FALSE}
+LASSO.probsE <- predict(glmodE, LASSO.intdataE, type = "response")
+LASSO.aucE<- pROC::auc(predictor = LASSO.probsE[,1], response = InterimE$PH5_k2)
+LASSO.CI.aucE<- pROC::ci.auc(predictor = LASSO.probsE[,1], response = InterimE$PH5_k2)
+LASSO.CI.aucE
+plot(pROC::roc(predictor = LASSO.probsE[,1], response = InterimE$PH5_k2), main = paste("Cluster E Interim AUC:", round(LASSO.aucE,2)))
+```
+
+## AUCs
+
+```{r}
+kable(as.data.frame(rbind(`PH1` = round(LASSO.CI.aucA, 3), `PH2` = round(LASSO.CI.aucB, 3), `PH3` =  round(LASSO.CI.aucC, 3), `PH4` = round(LASSO.CI.aucD, 3), `PH5` = round(LASSO.CI.aucE, 3) )) %>% select(V2, V1,V3) %>% rename(AUC = V2, `Lower threshold 95% CI` = V1, `Upper threshold 95% CI` = V3)) %>% kable_styling(full_width = TRUE)
+```
+
+# Coefficients
+
+```{r}
+coefficients<- full_join(lasso.coefA, lasso.coefB, by = "miR") %>% full_join(., lasso.coefC, by = "miR") %>% full_join(., lasso.coefD, by = "miR") %>% full_join(., lasso.coefE, by = "miR") 
+
+coefPH1PH2PH3PH4 <- coefficients %>% select(-PH5)
+write_csv(coefficients, "AllPH.k2.LASSO.miR.coefficients.csv")
+
+kable(coefficients) %>% kable_styling(full_width = TRUE)
+```
+
+
+```{r}
+library(viridis)
+allcoefslong <- coefficients %>% pivot_longer(-c(miR), names_to = "Cluster", values_to = "Coefficient") %>% filter(Coefficient != 0) %>% arrange(desc(abs(Coefficient)))  %>%  mutate(miR=factor(miR, levels = unique(miR)))
+
+ggplot(allcoefslong, aes(x = miR, y = Coefficient, fill = Cluster)) + geom_col() + theme_minimal()+ theme(axis.text.x = element_text(angle = 90, vjust = 1, size = 12, hjust = 1)) + scale_fill_viridis(discrete=TRUE)
+```
+
+```{r}
+noPH5coeflong <- coefPH1PH2PH3PH4 %>% pivot_longer(-c(miR), names_to = "Cluster", values_to = "Coefficient") %>% filter(Coefficient != 0) %>% arrange(desc(abs(Coefficient)))  %>%  mutate(miR=factor(miR, levels = unique(miR)))
+
+ggplot(noPH5coeflong, aes(x = miR, y = Coefficient, fill = Cluster)) + geom_col() + theme_minimal()+ theme(axis.text.x = element_text(angle = 90, vjust = 1, size = 12, hjust = 1)) + scale_fill_viridis(discrete=TRUE)
+
+ noPH5coeflong %>% arrange(desc(Coefficient)) %>% ggplot(aes(x = miR, y = Coefficient, fill = Cluster)) + geom_col() + theme_minimal()+ theme(axis.text.x = element_text(angle = 90, vjust = 1, size = 12, hjust = 1)) + scale_fill_viridis(discrete=TRUE) + facet_wrap(~Cluster, scales="free")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,1372 @@
+---
+title: "PH4"
+author: "Niamh Errington"
+date: "`r format(Sys.time(), '%d %B %Y')`" 
+output: 
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+    toc_collapsed: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+
+# Set up
+
+MicroRNAs initially filtered to within the subset used by MiRXES. Chris' LASSO model is then used to transform these, and clustering done on these numbers.
+
+Optimal number of miRNAs: 
+
+* PH4: 75
+
+Number of clusters (votes):
+
+**PH4 **
+
+* 2 clusters = **7 votes**
+* 3 clusters = 1 votes
+* 7 clusters = 2 votes
+* 8 clusters = **4 votes**
+
+```{r, message = FALSE, warning = FALSE}
+library(readr)
+library(readxl)
+library(tidyverse)
+library(dunn.test)
+library(kableExtra)
+library(chisq.posthoc.test)
+library(questionr)
+library(reshape2)
+library(ggpattern)
+
+Clusterphenoall <- read_csv("ClusterphenoPH4.csv") %>% filter(dana1 == "PH4")
+Clusterpheno<- Clusterphenoall %>% filter(PARTITION != "VALIDATION")
+
+```
+
+
+# Clinical Associations
+
+Each parameter is assessed for normality, then an appropriate statistical test applied to look for associations to cluster membership. Where the variances are unequal, the data are log transformed. Where an inital p value is significant, post hoc tests are applied to look between groups. 
+
+```{r}
+BMI <- c(Median = median(Clusterpheno$bmi, na.rm = TRUE), IQR = IQR(Clusterpheno$bmi, na.rm = TRUE))
+age <- c(Median = median(Clusterpheno$age, na.rm = TRUE), IQR = IQR(Clusterpheno$age, na.rm = TRUE))
+NTproBNP <- c(Median = median(Clusterpheno$ntprobnp, na.rm = TRUE), IQR = IQR(Clusterpheno$ntprobnp, na.rm = TRUE))
+`Uric Acid` <- c(Median = median(Clusterpheno$ua, na.rm = TRUE), IQR = IQR(Clusterpheno$ua, na.rm = TRUE))
+`6MWD` <- c(Median = median(Clusterpheno$smwd, na.rm = TRUE), IQR = IQR(Clusterpheno$smwd, na.rm = TRUE))
+ISWT <- c(Median = median(Clusterpheno$iswt, na.rm = TRUE), IQR = IQR(Clusterpheno$iswt, na.rm = TRUE))
+
+mPAP <- c(Median = median(Clusterpheno$mPAP, na.rm = TRUE), IQR = IQR(Clusterpheno$mPAP, na.rm = TRUE))
+sPAP <- c(Median = median(Clusterpheno$sPAP, na.rm = TRUE), IQR = IQR(Clusterpheno$sPAP, na.rm = TRUE))
+dPAP <- c(Median = median(Clusterpheno$dPAP, na.rm = TRUE), IQR = IQR(Clusterpheno$dPAP, na.rm = TRUE))
+mRAP <- c(Median = median(Clusterpheno$mRAP, na.rm = TRUE), IQR = IQR(Clusterpheno$mRAP, na.rm = TRUE))
+SvO2 <- c(Median = median(Clusterpheno$SvO2, na.rm = TRUE), IQR = IQR(Clusterpheno$SvO2, na.rm = TRUE))
+PVR <- c(Median = median(Clusterpheno$PVRdynes, na.rm = TRUE), IQR = IQR(Clusterpheno$PVRdynes, na.rm = TRUE))
+PAWP <- c(Median = median(Clusterpheno$PAWP, na.rm = TRUE), IQR = IQR(Clusterpheno$PAWP, na.rm = TRUE))
+BPDIA <- c(Median = median(Clusterpheno$bpdia, na.rm = TRUE), IQR = IQR(Clusterpheno$bpdia, na.rm = TRUE))
+BPSYS <- c(Median = median(Clusterpheno$bpsys, na.rm = TRUE), IQR = IQR(Clusterpheno$bpsys, na.rm = TRUE))
+eGFR <- c(Median = median(Clusterpheno$eGFR, na.rm = TRUE), IQR = IQR(Clusterpheno$eGFR, na.rm = TRUE))
+`Cardiac Output` <- c(Median = median(Clusterpheno$CardiacOutput, na.rm = TRUE), IQR = IQR(Clusterpheno$CardiacOutput, na.rm = TRUE))
+`Cardiac Index` <- c(Median = median(Clusterpheno$CardiacIndex, na.rm = TRUE), IQR = IQR(Clusterpheno$CardiacIndex, na.rm = TRUE))
+Creatinine <- c(Median = median(Clusterpheno$Creatinine, na.rm = TRUE), IQR = IQR(Clusterpheno$Creatinine, na.rm = TRUE))
+`Platelet Count` <- c(Median = median(Clusterpheno$platelet_count, na.rm = TRUE), IQR = IQR(Clusterpheno$platelet_count, na.rm = TRUE))
+`TLCO predicted` <- c(Median = median(Clusterpheno$tlco_predicted, na.rm = TRUE), IQR = IQR(Clusterpheno$tlco_predicted, na.rm = TRUE))
+
+FVCP <- c(Mean = mean(Clusterpheno$fvcp, na.rm = TRUE), SD = sd(Clusterpheno$fvcp, na.rm = TRUE))
+kable(rbind(BMI, age, NTproBNP, `Uric Acid`, `6MWD`, ISWT, PVR, mPAP, sPAP, dPAP, mRAP, SvO2, BPDIA, BPSYS, PAWP, eGFR, `Cardiac Output`, `Cardiac Index`,`Platelet Count`, Creatinine, `TLCO predicted`), caption = "Not normally distributed variables") %>% kable_styling(full_width = TRUE)
+
+kable(FVCP, col.names = "FVCP", caption = "Normally distributed variables") %>% kable_styling(full_width = TRUE)
+```
+
+```{r}
+as.data.frame(table(Clusterpheno$dana, Clusterpheno$sex)) %>% ggplot(aes(x = Var1, y = Freq, fill = Var2)) + geom_bar(stat = "identity") + scale_fill_manual(values = c("midnight blue", "cornflowerblue")) + ggtitle("PH status by sex") + labs(x = "Cluster", y = "") + guides(fill=guide_legend(title=NULL)) + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+```
+
+```{r}
+as.data.frame(table(Clusterpheno$site, Clusterpheno$treated)) %>% ggplot(aes(x = Var1, y = Freq, fill = Var2)) + geom_bar(stat = "identity") + scale_fill_manual(values = c("cornflowerblue","midnight blue")) + ggtitle("Treatment breakdown by site") + theme_minimal() + theme(axis.text.x = element_text(angle = 90)) + labs(x = "Cluster", y = "") + guides(fill=guide_legend(title=NULL))
+```
+
+# 2 clusters
+
+## Sex
+
+```{r}
+clusterfills2 <- c("cornflowerblue", "midnight blue")
+cp <- coord_polar(theta = "y")
+cp$is_free <- function() TRUE
+
+kable(addmargins(table(Clusterpheno$sex, Clusterpheno$PH4_k2))) %>% kable_styling(full_width = TRUE)
+kable(prop.table(table(Clusterpheno$sex, Clusterpheno$PH4_k2),2)*100, caption = "% composition per cluster") %>% kable_styling(full_width = TRUE)
+sex2<- chisq.test(table(Clusterpheno$sex, Clusterpheno$PH4_k2))
+sex2
+
+as.data.frame(table(Clusterpheno$PH4_k2, Clusterpheno$sex)) %>% ggplot(aes(x = Var1, y = Freq, fill = Var2)) + scale_fill_manual(values = c("midnight blue", "cornflowerblue"))  + geom_bar(stat = "identity") + ggtitle("Sex") + labs(x = "Cluster", y = "") + guides(fill=guide_legend(title=NULL)) + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+```
+
+## FC
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$fclass)), prop.table(table(is.na(Clusterpheno$fclass)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+```
+
+```{r}
+kable(addmargins(table(Clusterpheno$fclass,  Clusterpheno$PH4_k2))) %>% kable_styling(full_width = TRUE)
+kable(prop.table(table(Clusterpheno$fclass, Clusterpheno$PH4_k2),2)*100, caption = "% composition per cluster") %>% kable_styling(full_width = TRUE)
+fc2<- fisher.test(table(Clusterpheno$fclass, Clusterpheno$PH4_k2), conf.level = 0.95, simulate.p.value=TRUE)
+fc2
+
+as.data.frame(table(Clusterpheno$PH4_k2, Clusterpheno$fclass)) %>% ggplot(aes(x = Var1, y = Freq, fill = Var2)) + geom_bar(stat = "identity") + scale_fill_manual(values = c("deeppink","yellow", "midnight blue", "cornflowerblue")) + ggtitle("Functional Class") + labs(x = "Cluster", y = "") + guides(fill=guide_legend(title=NULL))
+```
+
+
+## REVEAL group
+
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$REVEALgroup)), prop.table(table(is.na(Clusterpheno)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+```
+
+```{r}
+kable(addmargins(table(Clusterpheno$REVEALgroup,  Clusterpheno$PH4_k2))) %>% kable_styling(full_width = TRUE)
+kable(prop.table(table(Clusterpheno$REVEALgroup, Clusterpheno$PH4_k2),2)*100, caption = "% composition per cluster") %>% kable_styling(full_width = TRUE)
+Reveal2<- fisher.test(table(Clusterpheno$REVEALgroup, Clusterpheno$PH4_k2), conf.level = 0.95, simulate.p.value=TRUE)
+Reveal2
+
+kable(chisq.posthoc.test(table(Clusterpheno$REVEALgroup, Clusterpheno$PH4_k2), method = "BH"))  %>% kable_styling(full_width = TRUE)
+
+as.data.frame(table(Clusterpheno$PH4_k2, Clusterpheno$REVEALgroup)) %>% ggplot(aes(x = Var1, y = Freq, fill = Var2)) + geom_bar(stat = "identity") + scale_fill_manual(values = c("deeppink", "midnight blue", "cornflowerblue")) + ggtitle("REVEAL score risk group") + labs(x = "Cluster", y = "") + guides(fill=guide_legend(title=NULL))
+```
+
+## Site
+
+Fisher test (simulate p values) p val < 0.05
+
+```{r}
+kable(addmargins(table(Clusterpheno$site,  Clusterpheno$PH4_k2))) %>% kable_styling(full_width = TRUE)
+kable(prop.table(table(Clusterpheno$site, Clusterpheno$PH4_k2),2)*100, caption = "% composition per cluster") %>% kable_styling(full_width = TRUE)
+site2<- fisher.test(table(Clusterpheno$site, Clusterpheno$PH4_k2), conf.level = 0.95, simulate.p.value=TRUE)
+site2
+#Posthoc Chisq
+kable(chisq.posthoc.test(table(Clusterpheno$site, Clusterpheno$PH4_k2), method = "BH"))  %>% kable_styling(full_width = TRUE)
+
+as.data.frame(table(Clusterpheno$PH4_k2, Clusterpheno$site)) %>% ggplot(aes(x = Var1, y = Freq, fill = Var2)) + geom_bar(stat = "identity") + scale_fill_manual(values = c("deeppink","cornflowerblue", "midnight blue")) + ggtitle("Site") + labs(x = "Cluster", y = "") + guides(fill=guide_legend(title=NULL))
+```
+
+## BMI
+
+Not normally distributed. Large variance ==> log transformed
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$bmi)), prop.table(table(is.na(Clusterpheno$bmi)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+```
+
+```{r, warning = FALSE, message = FALSE}
+Clusterpheno %>% select(PH4_k2, bmi) %>% filter(!is.na(bmi)) %>% ggplot(aes(x= PH4_k2, y =bmi)) + geom_boxplot(fill=clusterfills2) + labs(x = "Cluster", y = "BMI") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+
+Clusterpheno %>% filter(!is.na(bmi)) %>% group_by(PH4_k2) %>% summarise(Shapiro.pvalue = shapiro.test(bmi)$p.value, Mean = mean(bmi), Variance = var(bmi), LogMean = mean(log(bmi)), LogVariance = var(log(bmi)), Median = median(bmi), IQR = IQR(bmi)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+bmi2<- wilcox.test(log(bmi) ~ PH4_k2, data = Clusterpheno)
+
+bmi2
+```
+
+## Age
+
+Not normally distributed. Large variances ==> log transformed
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$age)), prop.table(table(is.na(Clusterpheno$age)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+
+Clusterpheno %>% select(PH4_k2, age) %>% filter(!is.na(age)) %>% ggplot(aes(x= PH4_k2, y =age)) + geom_boxplot(fill=clusterfills2) + labs(x = "Cluster", y = "Age") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+Clusterpheno %>%filter(!is.na(age)) %>% group_by(PH4_k2) %>% summarise(Shapiro.pvalue = shapiro.test(age)$p.value, Mean =mean(age), Variance = var(age), LogMean = mean(log(age)), LogVariance = var(log(age)), Median = median(age), IQR = IQR(age)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+age2<- wilcox.test(log(age) ~ PH4_k2, data = Clusterpheno)
+age2
+```
+
+## NTproBNP
+
+Not all normally distributed.
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$ntprobnp)), prop.table(table(is.na(Clusterpheno$ntprobnp)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+Clusterpheno %>% select(PH4_k2, ntprobnp) %>% ggplot(aes(x= PH4_k2, y = ntprobnp)) + geom_boxplot(fill=clusterfills2) + labs(x = "Cluster", y = "NT-proBNP") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+group_by(Clusterpheno, PH4_k2) %>% summarise(Shapiro.pvalue = shapiro.test(ntprobnp)$p.value, Variance = var(ntprobnp), Mean = mean(ntprobnp), Median = median(ntprobnp), IQR = IQR(ntprobnp)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+ntprobnp2<- wilcox.test(ntprobnp ~ PH4_k2, data = Clusterpheno)
+ntprobnp2
+
+```
+
+## Uric Acid
+
+Not all normally distributed.
+
+```{r, warning = FALSE, message = FALSE}
+kable(table(is.na(Clusterpheno$ua)), col.names = c("Missing Values", ""))
+
+Clusterpheno %>% select(PH4_k2, ua) %>% ggplot(aes(x= PH4_k2, y = ua)) + geom_boxplot(fill=clusterfills2) + labs(x = "Cluster", y = "Uric Acid") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+group_by(Clusterpheno, PH4_k2) %>% summarise(Shapiro.pvalue = shapiro.test(ua)$p.value, Variance = var(ua), Mean = mean(ua), Median = median(ua), IQR = IQR(ua)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+ua2<- wilcox.test(ua ~ PH4_k2, data = Clusterpheno)
+ua2
+```
+
+## FVCP
+
+Normally distributed. Large variance ==> log transformed
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$fvcp)), prop.table(table(is.na(Clusterpheno$fvcp)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+Clusterpheno %>% select(PH4_k2, fvcp) %>% ggplot(aes(x= PH4_k2, y = fvcp)) + geom_boxplot(fill=clusterfills2) + labs(x = "Cluster", y = "FVCP") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+Clusterpheno %>% filter(!is.na(fvcp)) %>% group_by(PH4_k2) %>% summarise(Shapiro.pvalue = shapiro.test(fvcp)$p.value, Variance = var(fvcp), Mean = mean(fvcp), SD = sd(fvcp), LogMean = mean(log(fvcp)), LogVariance = var(log(fvcp))) %>% kable(.) %>% kable_styling(full_width = TRUE)
+fvcp2<- t.test(log(fvcp) ~ PH4_k2, data = Clusterpheno, var.equal=TRUE)
+fvcp2
+```
+
+## Treatment 
+
+```{r, warning = FALSE, message = FALSE}
+kable(addmargins(table(Clusterpheno$treated, Clusterpheno$PH4_k2)), caption = "n") %>% kable_styling(full_width = TRUE)
+kable(prop.table(table(Clusterpheno$treated, Clusterpheno$PH4_k2),2)*100, caption = "% composition per cluster") %>% kable_styling(full_width = TRUE)
+
+treatment2<- chisq.test(table(Clusterpheno$treated, Clusterpheno$PH4_k2))
+treatment2
+as.data.frame(table(Clusterpheno$PH4_k2, Clusterpheno$treated)) %>% ggplot(aes(x = Var1, y = Freq, fill = Var2)) + geom_bar(stat = "identity") + scale_fill_manual(values = c("cornflowerblue", "midnight blue")) + ggtitle("Treated") + labs(x = "Cluster", y = "") + guides(fill=guide_legend(title=NULL))
+
+#for posthoc Chisq
+kable(chisq.posthoc.test(table(Clusterpheno$treated, Clusterpheno$PH4_k2), method = "BH"))  %>% kable_styling(full_width = TRUE)
+```
+
+### Treatment breakdown
+
+```{r}
+kable(addmargins(table(Clusterpheno$ERA, Clusterpheno$PH4_k2)), caption = "ERAs") %>% kable_styling(full_width = TRUE)
+kable(addmargins(table(Clusterpheno$Prostanoid, Clusterpheno$PH4_k2)), caption = "Prostanoids") %>% kable_styling(full_width = TRUE)
+kable(addmargins(table(Clusterpheno$Other, Clusterpheno$PH4_k2)), caption = "Other PH drugs") %>% kable_styling(full_width = TRUE)
+```
+
+## 6MWD
+
+Not normally distributed, large variance ==> log transformed
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$smwd)), prop.table(table(is.na(Clusterpheno$smwd)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+Clusterpheno %>% select(PH4_k2, smwd) %>% ggplot(aes(x= PH4_k2, y =smwd)) + geom_boxplot(fill=clusterfills2) + labs(x = "Cluster", y = "6MWD") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+Clusterpheno %>% filter(!is.na(smwd)) %>% group_by(PH4_k2) %>% summarise(Shapiro.pvalue = shapiro.test(smwd)$p.value, Variance = var(smwd), Mean = mean(smwd), logVariance = var(log(smwd)), logmean = mean(log(smwd)), Median = median(smwd), IQR = IQR(smwd)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+smwd2<- wilcox.test(log(smwd) ~ PH4_k2, data = Clusterpheno)
+smwd2
+
+```
+
+
+## ISWT
+
+Sheffield only
+
+Not normally distributed, log transformed
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$iswt)), prop.table(table(is.na(Clusterpheno$iswt)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+Clusterpheno %>% select(PH4_k2, iswt) %>% ggplot(aes(x= PH4_k2, y =iswt)) + geom_boxplot(fill=clusterfills2) + labs(x = "Cluster", y = "6MWD") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+Clusterpheno %>% filter(!is.na(iswt)) %>% group_by(PH4_k2) %>% summarise(Shapiro.pvalue = shapiro.test(iswt)$p.value, Variance = var(iswt), Mean = mean(iswt), logVariance = var(log(iswt)), logmean = mean(log(iswt)), Median = median(iswt), IQR = IQR(iswt)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+iswt2<- wilcox.test(log(iswt) ~ PH4_k2, data = Clusterpheno)
+iswt2
+```
+
+
+## BPDIA
+
+Not all normally distributed, large variance ==> log transformed
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$bpdia)), prop.table(table(is.na(Clusterpheno$bpdia)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+Clusterpheno %>% select(PH4_k2, bpdia) %>% ggplot(aes(x= PH4_k2, y =bpdia)) + geom_boxplot(fill=clusterfills2) + labs(x = "Cluster", y = "BPDIA") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+Clusterpheno %>% filter(!is.na(bpdia)) %>% group_by(PH4_k2) %>% summarise(Shapiro.pvalue = shapiro.test(bpdia)$p.value, Variance = var(bpdia), Mean = mean(bpdia), logVariance = var(log(bpdia)), logmean = mean(log(bpdia)), Median = median(bpdia), IQR = IQR(bpdia)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+bpdia2<- wilcox.test(log(bpdia) ~ PH4_k2, data = Clusterpheno)
+bpdia2
+```
+
+## BPSYS
+
+Not normally distributed, large variance ==> log transformed
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$bpsys)), prop.table(table(is.na(Clusterpheno$bpsys)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+Clusterpheno %>% select(PH4_k2, bpsys) %>% ggplot(aes(x= PH4_k2, y =bpsys)) + geom_boxplot(fill=clusterfills2) + labs(x = "Cluster", y = "BPSYS") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+Clusterpheno %>% filter(!is.na(bpsys)) %>% group_by(PH4_k2) %>% summarise(Shapiro.pvalue = shapiro.test(bpsys)$p.value, Variance = var(bpsys), Mean = mean(bpsys), logVariance = var(log(bpsys)), logmean = mean(log(bpsys)), Median = median(bpsys), IQR = IQR(bpsys))  %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+bpsys2<- wilcox.test(log(bpsys) ~ PH4_k2, data = Clusterpheno)
+bpsys2
+```
+
+
+## PH sub status
+
+```{r, warning = FALSE, message = FALSE}
+kable(addmargins(table(Clusterpheno$dana1.1, Clusterpheno$PH4_k2))) %>% kable_styling(full_width = TRUE)
+fisher.test(table(Clusterpheno$dana1.1, Clusterpheno$PH4_k2), conf.level = 0.95, simulate.p.value=TRUE)
+
+as.data.frame(table(Clusterpheno$dana1.1, Clusterpheno$PH4_k2))  %>% group_by(Var2, Var1) %>% ggplot(aes(x=Var2, y=Freq, fill=Var1)) + geom_bar(stat="identity") + ggtitle("PH Status, 6 Clusters") + labs(x = "Cluster", y = "") + guides(fill=guide_legend(title=NULL)) +  scale_fill_manual(values = c("midnight blue", "cornflowerblue"))
+
+#+ scale_fill_manual(values = c("tomato2","dark red", "red", "darksalmon", "midnight blue", "cornflowerblue")) 
+
+```
+
+## PVR
+
+Not normally distributed, unequal variance ==> log transformed
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$PVRdynes)), prop.table(table(is.na(Clusterpheno$PVRdynes)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+Clusterpheno %>% select(PH4_k2, PVRdynes) %>% filter(!is.na(PVRdynes)) %>% group_by(PH4_k2) %>% summarise(Shapiro.pvalue = shapiro.test(PVRdynes)$p.value, Mean = mean(PVRdynes), logmean = mean(log(PVRdynes)), Variance = var(PVRdynes), logvar = var(log(PVRdynes)), min = min(PVRdynes), max =  max(PVRdynes), median = median(PVRdynes), IQR = IQR(PVRdynes)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+Clusterpheno %>% select(PH4_k2, PVRdynes) %>% filter(!is.na(PVRdynes)) %>% ggplot(aes(x= PH4_k2, y =PVRdynes)) + geom_boxplot(fill=clusterfills2) + labs(x = "Cluster", y = "PVR (Dynes)") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+pvr2<- wilcox.test(log(PVRdynes) ~ PH4_k2, data = Clusterpheno)
+pvr2
+```
+
+## mPAP
+
+Not normally distributed, unequal variance ==> log transformed
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$mPAP)), prop.table(table(is.na(Clusterpheno$mPAP)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+Clusterpheno %>% select(PH4_k2, mPAP) %>% filter(!is.na(mPAP)) %>% group_by(PH4_k2) %>% summarise(Shapiro.pvalue = shapiro.test(mPAP)$p.value, Mean = mean(mPAP), logmean = mean(log(mPAP)), Variance = var(mPAP), logvar = var(log(mPAP)), min = min(mPAP), max =  max(mPAP), median = median(mPAP), IQR = IQR(mPAP))%>% kable(.) %>% kable_styling(full_width = TRUE)
+
+Clusterpheno %>% select(PH4_k2, mPAP) %>% filter(!is.na(mPAP)) %>% ggplot(aes(x= PH4_k2, y =mPAP)) + geom_boxplot(fill=clusterfills2) + labs(x = "Cluster", y = "mPAP (mm Hg)") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+mpap2<- wilcox.test(log(mPAP) ~ PH4_k2, data = Clusterpheno)
+mpap2
+```
+
+## sPAP
+
+Not normally distributed, unequal variance ==> log transformed
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$sPAP)), prop.table(table(is.na(Clusterpheno$sPAP)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+Clusterpheno %>% select(PH4_k2, sPAP) %>% filter(!is.na(sPAP)) %>% group_by(PH4_k2) %>% summarise(Shapiro.pvalue = shapiro.test(sPAP)$p.value, Mean = mean(sPAP), logmean = mean(log(sPAP)), Variance = var(sPAP), logvar = var(log(sPAP)), min = min(sPAP), max =  max(sPAP), median = median(sPAP), IQR = IQR(sPAP))%>% kable(.) %>% kable_styling(full_width = TRUE)
+
+Clusterpheno %>% select(PH4_k2, sPAP) %>% filter(!is.na(sPAP)) %>% ggplot(aes(x= PH4_k2, y =sPAP)) + geom_boxplot(fill=clusterfills2) + labs(x = "Cluster", y = "sPAP (mm Hg)") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+spap2<- wilcox.test(log(sPAP) ~ PH4_k2, data = Clusterpheno)
+spap2
+```
+
+## dPAP
+
+Not normally distributed, unequal variance ==> log transformed
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$dPAP)), prop.table(table(is.na(Clusterpheno$dPAP)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+Clusterpheno %>% select(PH4_k2, dPAP) %>% filter(!is.na(dPAP)) %>% group_by(PH4_k2) %>% summarise(Shapiro.pvalue = shapiro.test(dPAP)$p.value, Mean = mean(dPAP), logmean = mean(log(dPAP)), Variance = var(dPAP), logvar = var(log(dPAP)), min = min(dPAP), max =  max(dPAP), median = median(dPAP), IQR = IQR(dPAP))%>% kable(.) %>% kable_styling(full_width = TRUE)
+
+Clusterpheno %>% select(PH4_k2, dPAP) %>% filter(!is.na(dPAP)) %>% ggplot(aes(x= PH4_k2, y =dPAP)) + geom_boxplot(fill=clusterfills2) + labs(x = "Cluster", y = "dPAP (mm Hg)") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+dpap2<- wilcox.test(log(dPAP) ~ PH4_k2, data = Clusterpheno)
+dpap2
+```
+
+## mRAP
+
+Not normally distributed, log transformed
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$mRAP)), prop.table(table(is.na(Clusterpheno$mRAP)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+Clusterpheno %>% select(PH4_k2, mRAP) %>% filter(!is.na(mRAP)) %>% group_by(PH4_k2) %>% summarise(Shapiro.pvalue = shapiro.test(mRAP)$p.value, Mean = mean(mRAP), logmean = mean(log(mRAP)), Variance = var(mRAP), logvar = var(log(mRAP)), min = min(mRAP), max =  max(mRAP), median = median(mRAP), IQR = IQR(mRAP))%>% kable(.) %>% kable_styling(full_width = TRUE)
+
+Clusterpheno %>% select(PH4_k2, mRAP) %>% filter(!is.na(mRAP)) %>% ggplot(aes(x= PH4_k2, y =mRAP)) + geom_boxplot(fill=clusterfills2) + labs(x = "Cluster", y = "mRAP (mm Hg)") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+mRAP2<- wilcox.test(log(mRAP) ~ PH4_k2, data = Clusterpheno)
+mRAP2
+```
+
+## SvO2
+
+Not normally distributed, unequal variance ==> log transformed
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$SvO2)), prop.table(table(is.na(Clusterpheno$SvO2)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+Clusterpheno %>% select(PH4_k2, SvO2) %>% filter(!is.na(SvO2)) %>% group_by(PH4_k2) %>% summarise(Shapiro.pvalue = shapiro.test(SvO2)$p.value, Mean = mean(SvO2), logmean = mean(log(SvO2)), Variance = var(SvO2), logvar = var(log(SvO2)), min = min(SvO2), max =  max(SvO2), median = median(SvO2), IQR = IQR(SvO2))%>% kable(.) %>% kable_styling(full_width = TRUE)
+
+Clusterpheno %>% select(PH4_k2, SvO2) %>% filter(!is.na(SvO2)) %>% ggplot(aes(x= PH4_k2, y =SvO2)) + geom_boxplot(fill=clusterfills2) + labs(x = "Cluster", y = "SvO2") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+svo22<- wilcox.test(log(SvO2) ~ PH4_k2, data = Clusterpheno)
+svo22
+```
+
+## PAWP
+
+Not normally distributed, unequal variance ==> log transformed
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$PAWP)), prop.table(table(is.na(Clusterpheno$PAWP)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+Clusterpheno %>% select(PH4_k2, PAWP) %>% filter(!is.na(PAWP)) %>% group_by(PH4_k2) %>% summarise(Shapiro.pvalue = shapiro.test(PAWP)$p.value, Mean = mean(PAWP), logmean = mean(log(PAWP)), Variance = var(PAWP), logvar = var(log(PAWP)), min = min(PAWP), max =  max(PAWP), median = median(PAWP), IQR = IQR(PAWP)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+Clusterpheno %>% select(PH4_k2, PAWP) %>% filter(!is.na(PAWP)) %>% ggplot(aes(x= PH4_k2, y =PAWP)) + geom_boxplot(fill=clusterfills2) + labs(x = "Cluster", y = "PAWP") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+pawp2<- wilcox.test(log(PAWP) ~ PH4_k2, data = Clusterpheno)
+pawp2
+```
+
+## Platelet Count
+
+Not normally distributed, unequal variance ==> log transformed
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$platelet_count)), prop.table(table(is.na(Clusterpheno$platelet_count)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+Clusterpheno %>% select(PH4_k2, platelet_count) %>% filter(!is.na(platelet_count)) %>% group_by(PH4_k2) %>% summarise(Shapiro.pvalue = shapiro.test(platelet_count)$p.value, Mean = mean(platelet_count), logmean = mean(log(platelet_count)), Variance = var(platelet_count), logvar = var(log(platelet_count)), min = min(platelet_count), max =  max(platelet_count), median = median(platelet_count), IQR = IQR(platelet_count)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+Clusterpheno %>% select(PH4_k2, platelet_count) %>% filter(!is.na(platelet_count)) %>% ggplot(aes(x= PH4_k2, y =platelet_count)) + geom_boxplot(fill=clusterfills2) + labs(x = "Cluster", y = "platelet_count") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+pc2<- wilcox.test(log(platelet_count) ~ PH4_k2, data = Clusterpheno)
+pc2
+```
+
+## eGFR
+
+eGFR - gfr estimated in Imperial & Cambridge, Sheffield data gfr. Sheffield units ml/min/1.73m^2 
+
+Not normally distributed, unequal variance ==> log transformed
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$eGFR)), prop.table(table(is.na(Clusterpheno$eGFR)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+Clusterpheno %>% select(PH4_k2, eGFR) %>% filter(!is.na(eGFR)) %>% group_by(PH4_k2) %>% summarise(Shapiro.pvalue = shapiro.test(eGFR)$p.value, Mean = mean(eGFR), logmean = mean(log(eGFR)), Variance = var(eGFR), logvar = var(log(eGFR)), min = min(eGFR), max =  max(eGFR), median = median(eGFR), IQR = IQR(eGFR)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+Clusterpheno %>% select(PH4_k2, eGFR) %>% filter(!is.na(eGFR)) %>% ggplot(aes(x= PH4_k2, y =eGFR)) + geom_boxplot(fill=clusterfills2) + labs(x = "Cluster", y = "eGFR") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+egfr2<- wilcox.test(log(eGFR) ~ PH4_k2, data = Clusterpheno)
+egfr2
+```
+
+## Cardiac Output
+
+RHC fick
+
+Not normally distributed, roughly equal variance
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$CardiacOutput)), prop.table(table(is.na(Clusterpheno$CardiacOutput)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+Clusterpheno %>% select(PH4_k2, CardiacOutput) %>% filter(!is.na(CardiacOutput)) %>% group_by(PH4_k2) %>% summarise(Shapiro.pvalue = shapiro.test(CardiacOutput)$p.value, Mean = mean(CardiacOutput), Variance = var(CardiacOutput), min = min(CardiacOutput), max =  max(CardiacOutput), median = median(CardiacOutput), IQR = IQR(CardiacOutput)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+Clusterpheno %>% select(PH4_k2, CardiacOutput) %>% filter(!is.na(CardiacOutput)) %>% ggplot(aes(x= PH4_k2, y =CardiacOutput)) + geom_boxplot(fill=clusterfills2) + labs(x = "Cluster", y = "Cardiac Index") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+CardiacOutput2<- wilcox.test(CardiacOutput ~ PH4_k2, data = Clusterpheno)
+CardiacOutput2
+```
+
+## Cardiac Index
+
+CardiacIndex RHC fick
+
+Not normally distributed, roughly equal variance
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$CardiacIndex)), prop.table(table(is.na(Clusterpheno$CardiacIndex)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+Clusterpheno %>% select(PH4_k2, CardiacIndex) %>% filter(!is.na(CardiacIndex)) %>% group_by(PH4_k2) %>% summarise(Shapiro.pvalue = shapiro.test(CardiacIndex)$p.value, Mean = mean(CardiacIndex), Variance = var(CardiacIndex), min = min(CardiacIndex), max =  max(CardiacIndex), median = median(CardiacIndex), IQR = IQR(CardiacIndex)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+Clusterpheno %>% select(PH4_k2, CardiacIndex) %>% filter(!is.na(CardiacIndex)) %>% ggplot(aes(x= PH4_k2, y =CardiacIndex)) + geom_boxplot(fill=clusterfills2) + labs(x = "Cluster", y = "Cardiac Index") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+CardiacIndex2<- wilcox.test(CardiacIndex ~ PH4_k2, data = Clusterpheno)
+CardiacIndex2
+```
+
+## Creatinine
+
+Not normally distributed, unequal variance ==> log transformed
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$Creatinine)), prop.table(table(is.na(Clusterpheno$Creatinine)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+Clusterpheno %>% select(PH4_k2, Creatinine) %>% filter(!is.na(Creatinine)) %>% group_by(PH4_k2) %>% summarise(Shapiro.pvalue = shapiro.test(Creatinine)$p.value, Mean = mean(Creatinine), logmean = mean(log(Creatinine)), Variance = var(Creatinine), logvar = var(log(Creatinine)), min = min(Creatinine), max =  max(Creatinine), median = median(Creatinine), IQR = IQR(Creatinine)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+Clusterpheno %>% select(PH4_k2, Creatinine) %>% filter(!is.na(Creatinine)) %>% ggplot(aes(x= PH4_k2, y =Creatinine)) + geom_boxplot(fill=clusterfills2) + labs(x = "Cluster", y = "Creatinine") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+Creat2<- wilcox.test(log(Creatinine) ~ PH4_k2, data = Clusterpheno)
+Creat2
+```
+
+## TLco predicted
+
+Not normally distributed, unequal variance ==> log transformed
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$tlco_predicted )), prop.table(table(is.na(Clusterpheno$tlco_predicted)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+Clusterpheno %>% select(PH4_k2, tlco_predicted) %>% filter(!is.na(tlco_predicted)) %>% group_by(PH4_k2) %>% summarise(Shapiro.pvalue = shapiro.test(tlco_predicted)$p.value, Mean = mean(tlco_predicted), logmean = mean(log(tlco_predicted)), Variance = var(tlco_predicted), logvar = var(log(tlco_predicted)), min = min(tlco_predicted), max =  max(tlco_predicted), median = median(tlco_predicted), IQR = IQR(tlco_predicted)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+Clusterpheno %>% select(PH4_k2, tlco_predicted) %>% filter(!is.na(tlco_predicted)) %>% ggplot(aes(x= PH4_k2, y =tlco_predicted)) + geom_boxplot(fill=clusterfills2) + labs(x = "Cluster", y = "tlco_predicted") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+tlco2<- wilcox.test(log(tlco_predicted) ~ PH4_k2, data = Clusterpheno)
+tlco2
+```
+
+
+
+## Comorbidity: COPD
+
+```{r, warning = FALSE, message = FALSE}
+kable(addmargins(table(is.na(Clusterpheno$copd ))), col.names = c("Missing Values", ""))
+
+kable(addmargins(table(Clusterpheno$copd, Clusterpheno$PH4_k2))) %>% kable_styling(full_width = TRUE)
+copd2<- fisher.test(table(Clusterpheno$copd, Clusterpheno$PH4_k2), conf.level = 0.95, simulate.p.value=TRUE)
+
+copd2
+
+as.data.frame(table(Clusterpheno$PH4_k2, Clusterpheno$copd)) %>% ggplot(aes(x = Var1, y = Freq, fill = Var2)) + geom_bar(stat = "identity") + scale_fill_manual(values = c("cornflowerblue","midnight blue")) + ggtitle("COPD") + labs(x = "Cluster", y = "") + guides(fill=guide_legend(title=NULL)) + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+```
+
+## Comorbidity: Sleep Apnoea
+
+
+```{r, warning = FALSE, message = FALSE}
+kable(addmargins(table(is.na(Clusterpheno$SleepApnoea ))), col.names = c("Missing Values", ""))
+
+kable(addmargins(table(Clusterpheno$SleepApnoea, Clusterpheno$PH4_k2))) %>% kable_styling(full_width = TRUE)
+SleepApnoea2<- fisher.test(table(Clusterpheno$SleepApnoea, Clusterpheno$PH4_k2), conf.level = 0.95)
+SleepApnoea2
+
+as.data.frame(table(Clusterpheno$PH4_k2, Clusterpheno$SleepApnoea)) %>% ggplot(aes(x = Var1, y = Freq, fill = Var2)) + geom_bar(stat = "identity") + scale_fill_manual(values = c("cornflowerblue","midnight blue")) + ggtitle("Sleep Apnoea") + labs(x = "Cluster", y = "") + guides(fill=guide_legend(title=NULL)) + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+```
+
+## Comorbidity: Atrial Fibrillation
+
+
+```{r, warning = FALSE, message = FALSE}
+kable(table(is.na(Clusterpheno$AtrialFibrillation )), col.names = c("Missing Values", ""))
+
+kable(addmargins(table(Clusterpheno$AtrialFibrillation, Clusterpheno$PH4_k2))) %>% kable_styling(full_width = TRUE)
+AtrialFibrillation2<- chisq.test(table(Clusterpheno$AtrialFibrillation, Clusterpheno$PH4_k2))
+AtrialFibrillation2
+
+kable(chisq.posthoc.test(table(Clusterpheno$AtrialFibrillation, Clusterpheno$PH4_k2), method = "BH"))  %>% kable_styling(full_width = TRUE)
+
+as.data.frame(table(Clusterpheno$PH4_k2, Clusterpheno$AtrialFibrillation)) %>% ggplot(aes(x = Var1, y = Freq, fill = Var2)) + geom_bar(stat = "identity") + scale_fill_manual(values = c("cornflowerblue","midnight blue")) + ggtitle("Atrial Fibrillation") + labs(x = "Cluster", y = "") + guides(fill=guide_legend(title=NULL)) + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+```
+
+## Comorbidity: Type 2 Diabetes mellitus
+
+
+```{r, warning = FALSE, message = FALSE}
+kable(addmargins(table(is.na(Clusterpheno$t2dm ))), col.names = c("Missing Values", ""))
+
+kable(addmargins(table(Clusterpheno$t2dm, Clusterpheno$PH4_k2))) %>% kable_styling(full_width = TRUE)
+Diabetes2<- fisher.test(table(Clusterpheno$t2dm, Clusterpheno$PH4_k2), conf.level = 0.95, simulate.p.value=TRUE)
+Diabetes2
+
+as.data.frame(table(Clusterpheno$PH4_k2, Clusterpheno$t2dm)) %>% ggplot(aes(x = Var1, y = Freq, fill = Var2)) + geom_bar(stat = "identity") + scale_fill_manual(values = c("cornflowerblue","midnight blue")) + ggtitle("Type 2 Diabetes mellitus") + labs(x = "Cluster", y = "") + guides(fill=guide_legend(title=NULL)) + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+```
+
+
+## Comorbidity: Thyroid disease
+
+
+```{r, warning = FALSE, message = FALSE}
+kable(addmargins(table(is.na(Clusterpheno$thyroid_disease ))), col.names = c("Missing Values", ""))
+
+kable(addmargins(table(Clusterpheno$thyroid_disease, Clusterpheno$PH4_k2))) %>% kable_styling(full_width = TRUE)
+thyroid_disease2<- fisher.test(table(Clusterpheno$thyroid_disease, Clusterpheno$PH4_k2), conf.level = 0.95)
+thyroid_disease2
+
+as.data.frame(table(Clusterpheno$PH4_k2, Clusterpheno$thyroid_disease)) %>% ggplot(aes(x = Var1, y = Freq, fill = Var2)) + geom_bar(stat = "identity") + scale_fill_manual(values = c("cornflowerblue","midnight blue")) + ggtitle("Thyroid Disease") + labs(x = "Cluster", y = "") + guides(fill=guide_legend(title=NULL)) + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+```
+
+## Comorbidity: CTD
+
+Not including SSc
+
+```{r, warning = FALSE, message = FALSE}
+kable(addmargins(table(is.na(Clusterpheno$OtherCTD ))), col.names = c("Missing Values", ""))
+
+kable(addmargins(table(Clusterpheno$OtherCTD, Clusterpheno$PH4_k2))) %>% kable_styling(full_width = TRUE)
+CTD2<- fisher.test(table(Clusterpheno$OtherCTD, Clusterpheno$PH4_k2), conf.level = 0.95, simulate.p.value = TRUE)
+CTD2
+
+as.data.frame(table(Clusterpheno$PH4_k2, Clusterpheno$OtherCTD)) %>% ggplot(aes(x = Var1, y = Freq, fill = Var2)) + geom_bar(stat = "identity") + scale_fill_manual(values = c("cornflowerblue","midnight blue")) + ggtitle("Other CTD") + labs(x = "Cluster", y = "") + guides(fill=guide_legend(title=NULL)) + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+```
+
+## Comorbidity: SSc
+
+
+```{r, warning = FALSE, message = FALSE}
+kable(addmargins(table(is.na(Clusterpheno$ssc ))), col.names = c("Missing Values", ""))
+
+kable(addmargins(table(Clusterpheno$ssc, Clusterpheno$PH4_k2))) %>% kable_styling(full_width = TRUE)
+scleroderma2<- fisher.test(table(Clusterpheno$ssc, Clusterpheno$PH4_k2), conf.level = 0.95, simulate.p.value = TRUE)
+scleroderma2
+
+as.data.frame(table(Clusterpheno$PH4_k2, Clusterpheno$ssc)) %>% ggplot(aes(x = Var1, y = Freq, fill = Var2)) + geom_bar(stat = "identity") + scale_fill_manual(values = c("cornflowerblue","midnight blue")) + ggtitle("SSc") + labs(x = "Cluster", y = "") + guides(fill=guide_legend(title=NULL)) + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+```
+
+## Comorbidity: Ischaemic heart disease
+
+```{r, warning = FALSE, message = FALSE}
+kable(addmargins(table(is.na(Clusterpheno$ihd ))), col.names = c("Missing Values", ""))
+
+Clusterpheno$ihd <- replace_na(Clusterpheno$ihd, "no")
+kable(addmargins(table(Clusterpheno$ihd, Clusterpheno$PH4_k2))) %>% kable_styling(full_width = TRUE)
+ihd2<- fisher.test(table(Clusterpheno$ihd, Clusterpheno$PH4_k2), conf.level = 0.95, simulate.p.value = TRUE)
+ihd2
+
+as.data.frame(table(Clusterpheno$PH4_k2, Clusterpheno$ihd)) %>% ggplot(aes(x = Var1, y = Freq, fill = Var2)) + geom_bar(stat = "identity") + scale_fill_manual(values = c("cornflowerblue","midnight blue")) + ggtitle("Ischaemic heart disease") + labs(x = "Cluster", y = "") + guides(fill=guide_legend(title=NULL)) + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+```
+
+<a id="Summary"></a> 
+
+# Summary (2 clusters)
+
+```{r}
+clinsums <- as.data.frame(rbind(c("sex", sex2$p.value), c("FC", fc2$p.value), c("Site", site2$p.value), c("BMI", bmi2$p.value), c("Age", age2$p.value), c("NTproBNP", ntprobnp2$p.value), c("Uric Acid", ua2$p.value), c("FVCP", fvcp2$p.value), c("REVEAL risk group", Reveal2$p.value), c("Treatment", treatment2$p.value), c("6MWD", smwd2$p.value), c("ISWT", iswt2$p.value), c("BPDIA",bpdia2$p.value), c("BPSYS", bpsys2$p.value), c("PVR", pvr2$p.value), c("mPAP", mpap2$p.value), c("sPAP", spap2$p.value), c("dPAP", dpap2$p.value), c("mRAP", mRAP2$p.value), c("SvO2", svo22$p.value), c("PAWP", pawp2$p.value), c("Platelet Count", pc2$p.value), c("eGFR", egfr2$p.value), c("Cardiac Output", CardiacOutput2$p.value), c("Cardiac Index", CardiacIndex2$p.value), c("Creatinine", Creat2$p.value), c("TLCO predicted", tlco2$p.value), c("Comorbidity: COPD", copd2$p.value), c("Comorbidity: Sleep Apnea", SleepApnoea2$p.value), c("Comorbidity: Atrial Fibrillation", AtrialFibrillation2$p.value), c("Comorbidity: Diabetes", Diabetes2$p.value), c("Comorbidity: Thyroid Disease", thyroid_disease2$p.value), c("Comorbidity: CTD", CTD2$p.value), c("Comorbidity: Scleroderma", scleroderma2$p.value), c("Comorbidity: Ischaemic heart disease", ihd2$p.value)))
+clinsums <- clinsums %>% mutate(V2 = as.numeric(V2)) %>% mutate(V2 = round(V2, 4)) %>% rename(`Clinical Parameter` = V1, Pvalue = V2) %>% mutate(`Adjusted Pvalue` = signif(p.adjust(Pvalue, "BH"), digits = 3)) %>% mutate(Significant = ifelse(`Adjusted Pvalue` <= 0.05, "*", "")) %>% select(`Clinical Parameter`, Pvalue, `Adjusted Pvalue`, Significant) %>% arrange(`Adjusted Pvalue`)
+
+kable(clinsums) %>% kable_styling(full_width = TRUE)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# 8 clusters
+
+## Sex
+
+```{r}
+clusterfills8 <- c("deeppink", "dark red", "darksalmon", "yellow", "cornflowerblue", "midnight blue",  "grey", "white")
+
+kable(addmargins(table(Clusterpheno$sex, Clusterpheno$PH4_k8))) %>% kable_styling(full_width = TRUE)
+sex7<- chisq.test(table(Clusterpheno$sex, Clusterpheno$PH4_k8))
+sex7
+
+as.data.frame(table(Clusterpheno$PH4_k8, Clusterpheno$sex)) %>% ggplot(aes(x = Var1, y = Freq, fill = Var2)) + scale_fill_manual(values = c("midnight blue", "cornflowerblue"))  + geom_bar(stat = "identity") + ggtitle("Sex") + labs(x = "Cluster", y = "") + guides(fill=guide_legend(title=NULL)) + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+```
+
+## FC
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$fclass)), prop.table(table(is.na(Clusterpheno$fclass)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+```
+
+```{r}
+kable(addmargins(table(Clusterpheno$fclass,  Clusterpheno$PH4_k8))) %>% kable_styling(full_width = TRUE)
+kable(prop.table(table(Clusterpheno$fclass, Clusterpheno$PH4_k8),2)*100, caption = "% composition per cluster") %>% kable_styling(full_width = TRUE)
+fc7<- fisher.test(table(Clusterpheno$fclass, Clusterpheno$PH4_k8), conf.level = 0.95, simulate.p.value=TRUE)
+fc7
+
+as.data.frame(table(Clusterpheno$PH4_k8, Clusterpheno$fclass)) %>% ggplot(aes(x = Var1, y = Freq, fill = Var2)) + geom_bar(stat = "identity") + scale_fill_manual(values = c("deeppink","yellow", "midnight blue", "cornflowerblue")) + ggtitle("Functional Class") + labs(x = "Cluster", y = "") + guides(fill=guide_legend(title=NULL))
+```
+
+
+## REVEAL group
+
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$REVEALgroup)), prop.table(table(is.na(Clusterpheno)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+```
+
+```{r}
+kable(addmargins(table(Clusterpheno$REVEALgroup,  Clusterpheno$PH4_k8))) %>% kable_styling(full_width = TRUE)
+kable(prop.table(table(Clusterpheno$REVEALgroup, Clusterpheno$PH4_k8),2)*100, caption = "% composition per cluster") %>% kable_styling(full_width = TRUE)
+Reveal7<- fisher.test(table(Clusterpheno$REVEALgroup, Clusterpheno$PH4_k8), conf.level = 0.95, simulate.p.value=TRUE)
+Reveal7
+
+as.data.frame(table(Clusterpheno$PH4_k8, Clusterpheno$REVEALgroup)) %>% ggplot(aes(x = Var1, y = Freq, fill = Var2)) + geom_bar(stat = "identity") + scale_fill_manual(values = c("deeppink", "midnight blue", "cornflowerblue")) + ggtitle("REVEAL score risk group") + labs(x = "Cluster", y = "") + guides(fill=guide_legend(title=NULL))
+```
+
+## Site
+
+Fisher test (simulate p values) p val < 0.05
+
+```{r}
+kable(addmargins(table(Clusterpheno$site,  Clusterpheno$PH4_k8))) %>% kable_styling(full_width = TRUE)
+site7<- fisher.test(table(Clusterpheno$site, Clusterpheno$PH4_k8), conf.level = 0.95, simulate.p.value=TRUE)
+site7
+#Posthoc Chisq
+kable(chisq.posthoc.test(table(Clusterpheno$site, Clusterpheno$PH4_k8), method = "BH"))  %>% kable_styling(full_width = TRUE)
+
+as.data.frame(table(Clusterpheno$PH4_k8, Clusterpheno$site)) %>% ggplot(aes(x = Var1, y = Freq, fill = Var2)) + geom_bar(stat = "identity") + scale_fill_manual(values = c("deeppink","cornflowerblue", "midnight blue")) + ggtitle("Site") + labs(x = "Cluster", y = "") + guides(fill=guide_legend(title=NULL))
+```
+
+## BMI
+
+Not normally distributed. Large variance ==> log transformed
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$bmi)), prop.table(table(is.na(Clusterpheno$bmi)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+```
+
+```{r, warning = FALSE, message = FALSE}
+Clusterpheno %>% select(PH4_k8, bmi) %>% filter(!is.na(bmi)) %>% ggplot(aes(x= PH4_k8, y =bmi)) + geom_boxplot(fill=clusterfills8) + labs(x = "Cluster", y = "BMI") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+
+Clusterpheno %>% filter(!is.na(bmi)) %>% group_by(PH4_k8) %>% summarise(Shapiro.pvalue = shapiro.test(bmi)$p.value, Mean = mean(bmi), Variance = var(bmi), LogMean = mean(log(bmi)), LogVariance = var(log(bmi)), Median = median(bmi), IQR = IQR(bmi)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+bmi7<- kruskal.test(log(bmi) ~ PH4_k8, data = Clusterpheno)
+bmi7
+```
+
+## Age
+
+Not normally distributed. Large variances ==> log transformed
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$age)), prop.table(table(is.na(Clusterpheno$age)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+
+Clusterpheno %>% select(PH4_k8, age) %>% filter(!is.na(age)) %>% ggplot(aes(x= PH4_k8, y =age)) + geom_boxplot(fill=clusterfills8) + labs(x = "Cluster", y = "Age") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+Clusterpheno %>%filter(!is.na(age)) %>% group_by(PH4_k8) %>% summarise(Shapiro.pvalue = shapiro.test(age)$p.value, Mean =mean(age), Variance = var(age), LogMean = mean(log(age)), LogVariance = var(log(age)), Median = median(age), IQR = IQR(age)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+age7<- kruskal.test(log(age) ~ PH4_k8, data = Clusterpheno)
+age7
+```
+
+## NTproBNP
+
+Not all normally distributed.
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$ntprobnp)), prop.table(table(is.na(Clusterpheno$ntprobnp)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+Clusterpheno %>% select(PH4_k8, ntprobnp) %>% ggplot(aes(x= PH4_k8, y = ntprobnp)) + geom_boxplot(fill=clusterfills8) + labs(x = "Cluster", y = "NT-proBNP") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+group_by(Clusterpheno, PH4_k8) %>% summarise(Shapiro.pvalue = shapiro.test(ntprobnp)$p.value, Variance = var(ntprobnp), Mean = mean(ntprobnp), Median = median(ntprobnp), IQR = IQR(ntprobnp)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+ntprobnp7<- kruskal.test(ntprobnp ~ PH4_k8, data = Clusterpheno)
+ntprobnp7
+```
+
+## Uric Acid
+
+Not all normally distributed.
+
+```{r, warning = FALSE, message = FALSE}
+kable(table(is.na(Clusterpheno$ua)), col.names = c("Missing Values", ""))
+
+Clusterpheno %>% select(PH4_k8, ua) %>% ggplot(aes(x= PH4_k8, y = ua)) + geom_boxplot(fill=clusterfills8) + labs(x = "Cluster", y = "Uric Acid") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+group_by(Clusterpheno, PH4_k8) %>% summarise(Shapiro.pvalue = shapiro.test(ua)$p.value, Variance = var(ua), Mean = mean(ua), Median = median(ua), IQR = IQR(ua)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+ua7<- kruskal.test(ua ~ PH4_k8, data = Clusterpheno)
+ua7
+```
+
+## FVCP
+
+Normally distributed. Large variance ==> log transformed
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$fvcp)), prop.table(table(is.na(Clusterpheno$fvcp)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+Clusterpheno %>% select(PH4_k8, fvcp) %>% ggplot(aes(x= PH4_k8, y = fvcp)) + geom_boxplot(fill=clusterfills8) + labs(x = "Cluster", y = "FVCP") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+Clusterpheno %>% filter(!is.na(fvcp)) %>% group_by(PH4_k8) %>% summarise(Shapiro.pvalue = shapiro.test(fvcp)$p.value, Variance = var(fvcp), Mean = mean(fvcp), SD = sd(fvcp), LogMean = mean(log(fvcp)), LogVariance = var(log(fvcp))) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+fvcp7<- aov(log(fvcp) ~ PH4_k8, data = Clusterpheno)
+summary(fvcp7)
+```
+
+## Treatment 
+
+```{r, warning = FALSE, message = FALSE}
+kable(addmargins(table(Clusterpheno$treated, Clusterpheno$PH4_k8))) %>% kable_styling(full_width = TRUE)
+kable(prop.table(table(Clusterpheno$treated, Clusterpheno$PH4_k8),2)*100) %>% kable_styling(full_width = TRUE)
+treatment7<- chisq.test(table(Clusterpheno$treated, Clusterpheno$PH4_k8))
+treatment7
+as.data.frame(table(Clusterpheno$PH4_k8, Clusterpheno$treated)) %>% ggplot(aes(x = Var1, y = Freq, fill = Var2)) + geom_bar(stat = "identity") + scale_fill_manual(values = c("cornflowerblue","midnight blue")) + ggtitle("Treated") + labs(x = "Cluster", y = "") + guides(fill=guide_legend(title=NULL))
+
+#for posthoc Chisq
+kable(chisq.posthoc.test(table(Clusterpheno$treated, Clusterpheno$PH4_k8), method = "BH"))  %>% kable_styling(full_width = TRUE)
+```
+
+
+### Treatment breakdown
+
+```{r}
+kable(addmargins(table(Clusterpheno$ERA, Clusterpheno$PH4_k8)), caption = "ERAs") %>% kable_styling(full_width = TRUE)
+kable(addmargins(table(Clusterpheno$Prostanoid, Clusterpheno$PH4_k8)), caption = "Prostanoids") %>% kable_styling(full_width = TRUE)
+kable(addmargins(table(Clusterpheno$Other, Clusterpheno$PH4_k8)), caption = "Other PH drugs") %>% kable_styling(full_width = TRUE)
+```
+
+## 6MWD
+
+Not normally distributed, large variance ==> log transformed
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$smwd)), prop.table(table(is.na(Clusterpheno$smwd)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+Clusterpheno %>% select(PH4_k8, smwd) %>% ggplot(aes(x= PH4_k8, y =smwd)) + geom_boxplot(fill=clusterfills8) + labs(x = "Cluster", y = "6MWD") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+Clusterpheno %>% filter(!is.na(smwd)) %>% group_by(PH4_k8) %>% summarise(Shapiro.pvalue = shapiro.test(smwd)$p.value, Variance = var(smwd), Mean = mean(smwd), logVariance = var(log(smwd)), logmean = mean(log(smwd)), Median = median(smwd), IQR = IQR(smwd)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+smwd7<- kruskal.test(log(smwd) ~ PH4_k8, data = Clusterpheno)
+smwd7
+dunn.test(log(Clusterpheno$smwd), Clusterpheno$PH4_k8, method = "BH")
+
+```
+
+
+## ISWT
+
+Sheffield only
+
+Not normally distributed, log transformed
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$iswt)), prop.table(table(is.na(Clusterpheno$iswt)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+Clusterpheno %>% select(PH4_k8, iswt) %>% ggplot(aes(x= PH4_k8, y =iswt)) + geom_boxplot(fill=clusterfills8) + labs(x = "Cluster", y = "6MWD") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+Clusterpheno %>% filter(!is.na(iswt)) %>% group_by(PH4_k8) %>% summarise(Variance = var(iswt), Mean = mean(iswt), logVariance = var(log(iswt)), logmean = mean(log(iswt)), Median = median(iswt), IQR = IQR(iswt)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+iswt7<- kruskal.test(log(iswt) ~ PH4_k8, data = Clusterpheno)
+iswt7
+```
+
+
+## BPDIA
+
+Not all normally distributed, large variance ==> log transformed
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$bpdia)), prop.table(table(is.na(Clusterpheno$bpdia)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+Clusterpheno %>% select(PH4_k8, bpdia) %>% ggplot(aes(x= PH4_k8, y =bpdia)) + geom_boxplot(fill=clusterfills8) + labs(x = "Cluster", y = "BPDIA") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+Clusterpheno %>% filter(!is.na(bpdia)) %>% group_by(PH4_k8) %>% summarise(Shapiro.pvalue = shapiro.test(bpdia)$p.value, Variance = var(bpdia), Mean = mean(bpdia), logVariance = var(log(bpdia)), logmean = mean(log(bpdia)), Median = median(bpdia), IQR = IQR(bpdia)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+bpdia7<- kruskal.test(log(bpdia) ~ PH4_k8, data = Clusterpheno)
+bpdia7
+```
+
+## BPSYS
+
+Not normally distributed, large variance ==> log transformed
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$bpsys)), prop.table(table(is.na(Clusterpheno$bpsys)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+Clusterpheno %>% select(PH4_k8, bpsys) %>% ggplot(aes(x= PH4_k8, y =bpsys)) + geom_boxplot(fill=clusterfills8) + labs(x = "Cluster", y = "BPSYS") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+Clusterpheno %>% filter(!is.na(bpsys)) %>% group_by(PH4_k8) %>% summarise(Shapiro.pvalue = shapiro.test(bpsys)$p.value, Variance = var(bpsys), Mean = mean(bpsys), logVariance = var(log(bpsys)), logmean = mean(log(bpsys)), Median = median(bpsys), IQR = IQR(bpsys))  %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+bpsys7<- kruskal.test(log(bpsys) ~ PH4_k8, data = Clusterpheno)
+bpsys7
+```
+
+
+## PH sub status
+
+```{r, warning = FALSE, message = FALSE}
+kable(addmargins(table(Clusterpheno$dana1.1, Clusterpheno$PH4_k8))) %>% kable_styling(full_width = TRUE)
+fisher.test(table(Clusterpheno$dana1.1, Clusterpheno$PH4_k8), conf.level = 0.95, simulate.p.value=TRUE)
+
+as.data.frame(table(Clusterpheno$dana1.1, Clusterpheno$PH4_k8))  %>% group_by(Var2, Var1) %>% ggplot(aes(x=Var2, y=Freq, fill=Var1)) + geom_bar(stat="identity") + ggtitle("PH Status, 8 Clusters") + labs(x = "Cluster", y = "") + guides(fill=guide_legend(title=NULL)) +  scale_fill_manual(values = c("midnight blue", "cornflowerblue"))
+```
+
+## PVR
+
+Not normally distributed, unequal variance ==> log transformed
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$PVRdynes)), prop.table(table(is.na(Clusterpheno$PVRdynes)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+Clusterpheno %>% select(PH4_k8, PVRdynes) %>% filter(!is.na(PVRdynes)) %>% group_by(PH4_k8) %>% summarise(Shapiro.pvalue = shapiro.test(PVRdynes)$p.value, Mean = mean(PVRdynes), logmean = mean(log(PVRdynes)), Variance = var(PVRdynes), logvar = var(log(PVRdynes)), min = min(PVRdynes), max =  max(PVRdynes), median = median(PVRdynes), IQR = IQR(PVRdynes)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+Clusterpheno %>% select(PH4_k8, PVRdynes) %>% filter(!is.na(PVRdynes)) %>% ggplot(aes(x= PH4_k8, y =PVRdynes)) + geom_boxplot(fill=clusterfills8) + labs(x = "Cluster", y = "PVR (Dynes)") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+pvr7<- kruskal.test(log(PVRdynes) ~ PH4_k8, data = Clusterpheno)
+pvr7
+```
+
+## mPAP
+
+Not normally distributed, unequal variance ==> log transformed
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$mPAP)), prop.table(table(is.na(Clusterpheno$mPAP)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+Clusterpheno %>% select(PH4_k8, mPAP) %>% filter(!is.na(mPAP)) %>% group_by(PH4_k8) %>% summarise(Shapiro.pvalue = shapiro.test(mPAP)$p.value, Mean = mean(mPAP), logmean = mean(log(mPAP)), Variance = var(mPAP), logvar = var(log(mPAP)), min = min(mPAP), max =  max(mPAP), median = median(mPAP), IQR = IQR(mPAP))%>% kable(.) %>% kable_styling(full_width = TRUE)
+
+Clusterpheno %>% select(PH4_k8, mPAP) %>% filter(!is.na(mPAP)) %>% ggplot(aes(x= PH4_k8, y =mPAP)) + geom_boxplot(fill=clusterfills8) + labs(x = "Cluster", y = "mPAP (mm Hg)") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+mpap7<- kruskal.test(log(mPAP) ~ PH4_k8, data = Clusterpheno)
+mpap7
+```
+
+## sPAP
+
+Not normally distributed, unequal variance ==> log transformed
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$sPAP)), prop.table(table(is.na(Clusterpheno$sPAP)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+Clusterpheno %>% select(PH4_k8, sPAP) %>% filter(!is.na(sPAP)) %>% group_by(PH4_k8) %>% summarise(Shapiro.pvalue = shapiro.test(sPAP)$p.value, Mean = mean(sPAP), logmean = mean(log(sPAP)), Variance = var(sPAP), logvar = var(log(sPAP)), min = min(sPAP), max =  max(sPAP), median = median(sPAP), IQR = IQR(sPAP))%>% kable(.) %>% kable_styling(full_width = TRUE)
+
+Clusterpheno %>% select(PH4_k8, sPAP) %>% filter(!is.na(sPAP)) %>% ggplot(aes(x= PH4_k8, y =sPAP)) + geom_boxplot(fill=clusterfills8) + labs(x = "Cluster", y = "sPAP (mm Hg)") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+spap7<- kruskal.test(log(sPAP) ~ PH4_k8, data = Clusterpheno)
+spap7
+```
+
+## dPAP
+
+Not normally distributed, unequal variance ==> log transformed
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$dPAP)), prop.table(table(is.na(Clusterpheno$dPAP)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+Clusterpheno %>% select(PH4_k8, dPAP) %>% filter(!is.na(dPAP)) %>% group_by(PH4_k8) %>% summarise(Shapiro.pvalue = shapiro.test(dPAP)$p.value, Mean = mean(dPAP), logmean = mean(log(dPAP)), Variance = var(dPAP), logvar = var(log(dPAP)), min = min(dPAP), max =  max(dPAP), median = median(dPAP), IQR = IQR(dPAP))%>% kable(.) %>% kable_styling(full_width = TRUE)
+
+Clusterpheno %>% select(PH4_k8, dPAP) %>% filter(!is.na(dPAP)) %>% ggplot(aes(x= PH4_k8, y =dPAP)) + geom_boxplot(fill=clusterfills8) + labs(x = "Cluster", y = "dPAP (mm Hg)") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+dpap7<- kruskal.test(log(dPAP) ~ PH4_k8, data = Clusterpheno)
+dpap7
+```
+
+## mRAP
+
+Not normally distributed, log transformed
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$mRAP)), prop.table(table(is.na(Clusterpheno$mRAP)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+Clusterpheno %>% select(PH4_k8, mRAP) %>% filter(!is.na(mRAP)) %>% group_by(PH4_k8) %>% summarise(Shapiro.pvalue = shapiro.test(mRAP)$p.value, Mean = mean(mRAP), logmean = mean(log(mRAP)), Variance = var(mRAP), logvar = var(log(mRAP)), min = min(mRAP), max =  max(mRAP), median = median(mRAP), IQR = IQR(mRAP))%>% kable(.) %>% kable_styling(full_width = TRUE)
+
+Clusterpheno %>% select(PH4_k8, mRAP) %>% filter(!is.na(mRAP)) %>% ggplot(aes(x= PH4_k8, y =mRAP)) + geom_boxplot(fill=clusterfills8) + labs(x = "Cluster", y = "mRAP (mm Hg)") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+mRAP7<- kruskal.test(log(mRAP) ~ PH4_k8, data = Clusterpheno)
+mRAP7
+```
+
+## SvO2
+
+Not normally distributed, unequal variance ==> log transformed
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$SvO2)), prop.table(table(is.na(Clusterpheno$SvO2)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+Clusterpheno %>% select(PH4_k8, SvO2) %>% filter(!is.na(SvO2)) %>% group_by(PH4_k8) %>% summarise(Shapiro.pvalue = shapiro.test(SvO2)$p.value, Mean = mean(SvO2), logmean = mean(log(SvO2)), Variance = var(SvO2), logvar = var(log(SvO2)), min = min(SvO2), max =  max(SvO2), median = median(SvO2), IQR = IQR(SvO2))%>% kable(.) %>% kable_styling(full_width = TRUE)
+
+Clusterpheno %>% select(PH4_k8, SvO2) %>% filter(!is.na(SvO2)) %>% ggplot(aes(x= PH4_k8, y =SvO2)) + geom_boxplot(fill=clusterfills8) + labs(x = "Cluster", y = "SvO2") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+svo27<- kruskal.test(log(SvO2) ~ PH4_k8, data = Clusterpheno)
+svo27
+```
+
+## PAWP
+
+Not normally distributed, unequal variance ==> log transformed
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$PAWP)), prop.table(table(is.na(Clusterpheno$PAWP)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+Clusterpheno %>% select(PH4_k8, PAWP) %>% filter(!is.na(PAWP)) %>% group_by(PH4_k8) %>% summarise(Shapiro.pvalue = shapiro.test(PAWP)$p.value, Mean = mean(PAWP), logmean = mean(log(PAWP)), Variance = var(PAWP), logvar = var(log(PAWP)), min = min(PAWP), max =  max(PAWP), median = median(PAWP), IQR = IQR(PAWP)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+Clusterpheno %>% select(PH4_k8, PAWP) %>% filter(!is.na(PAWP)) %>% ggplot(aes(x= PH4_k8, y =PAWP)) + geom_boxplot(fill=clusterfills8) + labs(x = "Cluster", y = "PAWP") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+pawp7<- kruskal.test(log(PAWP) ~ PH4_k8, data = Clusterpheno)
+pawp7
+```
+
+## Platelet Count
+
+Not normally distributed, unequal variance ==> log transformed
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$platelet_count)), prop.table(table(is.na(Clusterpheno$platelet_count)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+Clusterpheno %>% select(PH4_k8, platelet_count) %>% filter(!is.na(platelet_count)) %>% group_by(PH4_k8) %>% summarise(Shapiro.pvalue = shapiro.test(platelet_count)$p.value, Mean = mean(platelet_count), logmean = mean(log(platelet_count)), Variance = var(platelet_count), logvar = var(log(platelet_count)), min = min(platelet_count), max =  max(platelet_count), median = median(platelet_count), IQR = IQR(platelet_count)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+Clusterpheno %>% select(PH4_k8, platelet_count) %>% filter(!is.na(platelet_count)) %>% ggplot(aes(x= PH4_k8, y =platelet_count)) + geom_boxplot(fill=clusterfills8) + labs(x = "Cluster", y = "platelet_count") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+pc7<- kruskal.test(log(platelet_count) ~ PH4_k8, data = Clusterpheno)
+pc7
+```
+
+## eGFR
+
+eGFR - gfr estimated in Imperial & Cambridge, Sheffield data gfr. Sheffield units ml/min/1.73m^2 
+
+Not normally distributed, unequal variance ==> log transformed
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$eGFR)), prop.table(table(is.na(Clusterpheno$eGFR)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+Clusterpheno %>% select(PH4_k8, eGFR) %>% filter(!is.na(eGFR)) %>% group_by(PH4_k8) %>% summarise(Shapiro.pvalue = shapiro.test(eGFR)$p.value, Mean = mean(eGFR), logmean = mean(log(eGFR)), Variance = var(eGFR), logvar = var(log(eGFR)), min = min(eGFR), max =  max(eGFR), median = median(eGFR), IQR = IQR(eGFR)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+Clusterpheno %>% select(PH4_k8, eGFR) %>% filter(!is.na(eGFR)) %>% ggplot(aes(x= PH4_k8, y =eGFR)) + geom_boxplot(fill=clusterfills8) + labs(x = "Cluster", y = "eGFR") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+egfr7<- kruskal.test(log(eGFR) ~ PH4_k8, data = Clusterpheno)
+egfr7
+```
+
+## Cardiac Output
+
+RHC fick
+
+Not normally distributed, roughly equal variance
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$CardiacOutput)), prop.table(table(is.na(Clusterpheno$CardiacOutput)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+Clusterpheno %>% select(PH4_k8, CardiacOutput) %>% filter(!is.na(CardiacOutput)) %>% group_by(PH4_k8) %>% summarise(Shapiro.pvalue = shapiro.test(CardiacOutput)$p.value, Mean = mean(CardiacOutput), Variance = var(CardiacOutput), min = min(CardiacOutput), max =  max(CardiacOutput), median = median(CardiacOutput), IQR = IQR(CardiacOutput)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+Clusterpheno %>% select(PH4_k8, CardiacOutput) %>% filter(!is.na(CardiacOutput)) %>% ggplot(aes(x= PH4_k8, y =CardiacOutput)) + geom_boxplot(fill=clusterfills8) + labs(x = "Cluster", y = "Cardiac Index") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+CardiacOutput7<- kruskal.test(CardiacOutput ~ PH4_k8, data = Clusterpheno)
+CardiacOutput7
+```
+
+## Cardiac Index
+
+CardiacIndex RHC fick
+
+Not normally distributed, roughly equal variance
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$CardiacIndex)), prop.table(table(is.na(Clusterpheno$CardiacIndex)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+Clusterpheno %>% select(PH4_k8, CardiacIndex) %>% filter(!is.na(CardiacIndex)) %>% group_by(PH4_k8) %>% summarise(Shapiro.pvalue = shapiro.test(CardiacIndex)$p.value, Mean = mean(CardiacIndex), Variance = var(CardiacIndex), min = min(CardiacIndex), max =  max(CardiacIndex), median = median(CardiacIndex), IQR = IQR(CardiacIndex)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+Clusterpheno %>% select(PH4_k8, CardiacIndex) %>% filter(!is.na(CardiacIndex)) %>% ggplot(aes(x= PH4_k8, y =CardiacIndex)) + geom_boxplot(fill=clusterfills8) + labs(x = "Cluster", y = "Cardiac Index") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+CardiacIndex7<- kruskal.test(CardiacIndex ~ PH4_k8, data = Clusterpheno)
+CardiacIndex7
+```
+
+## Creatinine
+
+Not normally distributed, unequal variance ==> log transformed
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$Creatinine)), prop.table(table(is.na(Clusterpheno$Creatinine)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+Clusterpheno %>% select(PH4_k8, Creatinine) %>% filter(!is.na(Creatinine)) %>% group_by(PH4_k8) %>% summarise(Shapiro.pvalue = shapiro.test(Creatinine)$p.value, Mean = mean(Creatinine), logmean = mean(log(Creatinine)), Variance = var(Creatinine), logvar = var(log(Creatinine)), min = min(Creatinine), max =  max(Creatinine), median = median(Creatinine), IQR = IQR(Creatinine)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+Clusterpheno %>% select(PH4_k8, Creatinine) %>% filter(!is.na(Creatinine)) %>% ggplot(aes(x= PH4_k8, y =Creatinine)) + geom_boxplot(fill=clusterfills8) + labs(x = "Cluster", y = "Creatinine") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+Creat7<- kruskal.test(log(Creatinine) ~ PH4_k8, data = Clusterpheno)
+Creat7
+```
+
+## TLco predicted
+
+Not normally distributed, unequal variance ==> log transformed
+
+```{r, warning = FALSE, message = FALSE}
+kable(cbind(table(is.na(Clusterpheno$tlco_predicted )), prop.table(table(is.na(Clusterpheno$tlco_predicted)))*100), col.names = c("Missing Values", "%")) %>% kable_styling(full_width = TRUE)
+Clusterpheno %>% select(PH4_k8, tlco_predicted) %>% filter(!is.na(tlco_predicted)) %>% group_by(PH4_k8) %>% summarise(Shapiro.pvalue = shapiro.test(tlco_predicted)$p.value, Mean = mean(tlco_predicted), logmean = mean(log(tlco_predicted)), Variance = var(tlco_predicted), logvar = var(log(tlco_predicted)), min = min(tlco_predicted), max =  max(tlco_predicted), median = median(tlco_predicted), IQR = IQR(tlco_predicted)) %>% kable(.) %>% kable_styling(full_width = TRUE)
+
+Clusterpheno %>% select(PH4_k8, tlco_predicted) %>% filter(!is.na(tlco_predicted)) %>% ggplot(aes(x= PH4_k8, y =tlco_predicted)) + geom_boxplot(fill=clusterfills8) + labs(x = "Cluster", y = "tlco_predicted") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+
+tlco7<- kruskal.test(log(tlco_predicted) ~ PH4_k8, data = Clusterpheno)
+tlco7
+```
+
+
+
+## Comorbidity: COPD
+
+```{r, warning = FALSE, message = FALSE}
+kable(addmargins(table(is.na(Clusterpheno$copd ))), col.names = c("Missing Values", ""))
+
+kable(addmargins(table(Clusterpheno$copd, Clusterpheno$PH4_k8))) %>% kable_styling(full_width = TRUE)
+copd7<- fisher.test(table(Clusterpheno$copd, Clusterpheno$PH4_k8), conf.level = 0.95, simulate.p.value=TRUE)
+
+copd7
+
+kable(chisq.posthoc.test(table(Clusterpheno$copd, Clusterpheno$PH4_k8), method = "BH"))  %>% kable_styling(full_width = TRUE)
+
+as.data.frame(table(Clusterpheno$PH4_k8, Clusterpheno$copd)) %>% ggplot(aes(x = Var1, y = Freq, fill = Var2)) + geom_bar(stat = "identity") + scale_fill_manual(values = c("cornflowerblue","midnight blue")) + ggtitle("COPD") + labs(x = "Cluster", y = "") + guides(fill=guide_legend(title=NULL)) + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+```
+
+## Comorbidity: Sleep Apnoea
+
+
+```{r, warning = FALSE, message = FALSE}
+kable(addmargins(table(is.na(Clusterpheno$SleepApnoea ))), col.names = c("Missing Values", ""))
+
+kable(addmargins(table(Clusterpheno$SleepApnoea, Clusterpheno$PH4_k8))) %>% kable_styling(full_width = TRUE)
+SleepApnoea7<- fisher.test(table(Clusterpheno$SleepApnoea, Clusterpheno$PH4_k8), conf.level = 0.95)
+SleepApnoea7
+
+as.data.frame(table(Clusterpheno$PH4_k8, Clusterpheno$SleepApnoea)) %>% ggplot(aes(x = Var1, y = Freq, fill = Var2)) + geom_bar(stat = "identity") + scale_fill_manual(values = c("cornflowerblue","midnight blue")) + ggtitle("Sleep Apnoea") + labs(x = "Cluster", y = "") + guides(fill=guide_legend(title=NULL)) + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+```
+
+## Comorbidity: Atrial Fibrillation
+
+
+```{r, warning = FALSE, message = FALSE}
+kable(table(is.na(Clusterpheno$AtrialFibrillation )), col.names = c("Missing Values", ""))
+
+kable(addmargins(table(Clusterpheno$AtrialFibrillation, Clusterpheno$PH4_k8))) %>% kable_styling(full_width = TRUE)
+AtrialFibrillation7<- chisq.test(table(Clusterpheno$AtrialFibrillation, Clusterpheno$PH4_k8))
+AtrialFibrillation7
+
+as.data.frame(table(Clusterpheno$PH4_k8, Clusterpheno$AtrialFibrillation)) %>% ggplot(aes(x = Var1, y = Freq, fill = Var2)) + geom_bar(stat = "identity") + scale_fill_manual(values = c("cornflowerblue","midnight blue")) + ggtitle("Atrial Fibrillation") + labs(x = "Cluster", y = "") + guides(fill=guide_legend(title=NULL)) + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+```
+
+## Comorbidity: Type 2 Diabetes mellitus
+
+
+```{r, warning = FALSE, message = FALSE}
+kable(addmargins(table(is.na(Clusterpheno$t2dm ))), col.names = c("Missing Values", ""))
+
+kable(addmargins(table(Clusterpheno$t2dm, Clusterpheno$PH4_k8))) %>% kable_styling(full_width = TRUE)
+Diabetes7<- fisher.test(table(Clusterpheno$t2dm, Clusterpheno$PH4_k8), conf.level = 0.95, simulate.p.value=TRUE)
+Diabetes7
+
+as.data.frame(table(Clusterpheno$PH4_k8, Clusterpheno$t2dm)) %>% ggplot(aes(x = Var1, y = Freq, fill = Var2)) + geom_bar(stat = "identity") + scale_fill_manual(values = c("cornflowerblue","midnight blue")) + ggtitle("Type 2 Diabetes mellitus") + labs(x = "Cluster", y = "") + guides(fill=guide_legend(title=NULL)) + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+```
+
+
+## Comorbidity: Thyroid disease
+
+
+```{r, warning = FALSE, message = FALSE}
+kable(addmargins(table(is.na(Clusterpheno$thyroid_disease ))), col.names = c("Missing Values", ""))
+
+kable(addmargins(table(Clusterpheno$thyroid_disease, Clusterpheno$PH4_k8))) %>% kable_styling(full_width = TRUE)
+thyroid_disease7<- fisher.test(table(Clusterpheno$thyroid_disease, Clusterpheno$PH4_k8), conf.level = 0.95)
+thyroid_disease7
+
+as.data.frame(table(Clusterpheno$PH4_k8, Clusterpheno$thyroid_disease)) %>% ggplot(aes(x = Var1, y = Freq, fill = Var2)) + geom_bar(stat = "identity") + scale_fill_manual(values = c("cornflowerblue","midnight blue")) + ggtitle("Thyroid Disease") + labs(x = "Cluster", y = "") + guides(fill=guide_legend(title=NULL)) + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+```
+
+## Comorbidity: CTD
+
+Not including SSc
+
+```{r, warning = FALSE, message = FALSE}
+kable(addmargins(table(is.na(Clusterpheno$OtherCTD ))), col.names = c("Missing Values", ""))
+
+kable(addmargins(table(Clusterpheno$OtherCTD, Clusterpheno$PH4_k8))) %>% kable_styling(full_width = TRUE)
+CTD7<- fisher.test(table(Clusterpheno$OtherCTD, Clusterpheno$PH4_k8), conf.level = 0.95, simulate.p.value = TRUE)
+CTD7
+kable(chisq.posthoc.test(table(Clusterpheno$OtherCTD, Clusterpheno$PH4_k8), method = "BH"))  %>% kable_styling(full_width = TRUE)
+
+as.data.frame(table(Clusterpheno$PH4_k8, Clusterpheno$OtherCTD)) %>% ggplot(aes(x = Var1, y = Freq, fill = Var2)) + geom_bar(stat = "identity") + scale_fill_manual(values = c("cornflowerblue","midnight blue")) + ggtitle("Other CTD") + labs(x = "Cluster", y = "") + guides(fill=guide_legend(title=NULL)) + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+```
+
+## Comorbidity: SSc
+
+
+```{r, warning = FALSE, message = FALSE}
+kable(addmargins(table(is.na(Clusterpheno$ssc ))), col.names = c("Missing Values", ""))
+
+kable(addmargins(table(Clusterpheno$ssc, Clusterpheno$PH4_k8))) %>% kable_styling(full_width = TRUE)
+scleroderma7<- fisher.test(table(Clusterpheno$ssc, Clusterpheno$PH4_k8), conf.level = 0.95, simulate.p.value = TRUE)
+scleroderma7
+
+as.data.frame(table(Clusterpheno$PH4_k8, Clusterpheno$ssc)) %>% ggplot(aes(x = Var1, y = Freq, fill = Var2)) + geom_bar(stat = "identity") + scale_fill_manual(values = c("cornflowerblue","midnight blue")) + ggtitle("SSc") + labs(x = "Cluster", y = "") + guides(fill=guide_legend(title=NULL)) + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+```
+
+## Comorbidity: Ischaemic heart disease
+
+
+```{r, warning = FALSE, message = FALSE}
+kable(addmargins(table(is.na(Clusterpheno$ihd ))), col.names = c("Missing Values", ""))
+
+Clusterpheno$ihd <- replace_na(Clusterpheno$ihd, "no")
+kable(addmargins(table(Clusterpheno$ihd, Clusterpheno$PH4_k8))) %>% kable_styling(full_width = TRUE)
+ihd7<- fisher.test(table(Clusterpheno$ihd, Clusterpheno$PH4_k8), conf.level = 0.95, simulate.p.value = TRUE)
+ihd7
+
+as.data.frame(table(Clusterpheno$PH4_k8, Clusterpheno$ihd)) %>% ggplot(aes(x = Var1, y = Freq, fill = Var2)) + geom_bar(stat = "identity") + scale_fill_manual(values = c("cornflowerblue","midnight blue")) + ggtitle("Ischaemic heart disease") + labs(x = "Cluster", y = "") + guides(fill=guide_legend(title=NULL)) + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "grey"), axis.line = element_line(colour = "grey"))
+```
+
+<a id="Summary"></a> 
+
+# Summary (8 clusters)
+
+```{r}
+clinsums <- as.data.frame(rbind(c("sex", sex7$p.value, ""), c("FC", fc7$p.value, ""), c("Site", site7$p.value, ""), c("BMI", bmi7$p.value, ""), c("Age", age7$p.value, ""), c("NTproBNP", ntprobnp7$p.value, ""), c("Uric Acid", ua7$p.value, ""), c("FVCP", 0.823, ""), c("REVEAL risk group", Reveal7$p.value, ""), c("Treatment", treatment7$p.value, ""), c("6MWD", smwd7$p.value, ""), c("ISWT", iswt7$p.value, ""), c("BPDIA",bpdia7$p.value, "" ), c("BPSYS", bpsys7$p.value, ""), c("PVR", pvr7$p.value, ""), c("mPAP", mpap7$p.value, ""), c("sPAP", spap7$p.value, ""), c("dPAP", dpap7$p.value, ""), c("mRAP", mRAP7$p.value, ""), c("SvO2", svo27$p.value, ""), c("PAWP", pawp7$p.value, ""), c("Platelet Count", pc7$p.value, ""), c("eGFR", egfr7$p.value, ""), c("Cardiac Output", CardiacOutput7$p.value, ""), c("Cardiac Index", CardiacIndex7$p.value, ""), c("Creatinine", Creat7$p.value, ""), c("TLCO predicted", tlco7$p.value, ""), c("Comorbidity: COPD", copd7$p.value, ""), c("Comorbidity: Sleep Apnea", SleepApnoea7$p.value, ""), c("Comorbidity: Atrial Fibrillation", AtrialFibrillation7$p.value, ""), c("Comorbidity: Diabetes", Diabetes7$p.value, ""), c("Comorbidity: Thyroid Disease", thyroid_disease7$p.value, ""), c("Comorbidity: CTD", CTD7$p.value, ""), c("Comorbidity: Scleroderma", scleroderma7$p.value, ""), c("Comorbidity: Ischaemic heart disease", ihd7$p.value, "" )))
+clinsums <- clinsums %>% mutate(V2 = as.numeric(V2)) %>% mutate(V2 = round(V2, 4)) %>% rename(`Clinical Parameter` = V1, Pvalue = V2, `Significant post-hoc tests` = V3) %>% mutate(`Adjusted Pvalue` = round(p.adjust(Pvalue, "BH"), 4)) %>% mutate(Significant = ifelse(`Adjusted Pvalue` <= 0.05, "*", "")) %>% select(`Clinical Parameter`, Pvalue, `Adjusted Pvalue`, Significant, `Significant post-hoc tests`) %>% arrange(`Adjusted Pvalue`)
+
+kable(clinsums) %>% kable_styling(full_width = TRUE)
+```
+
+# Survival
+
+DaysToEvent - number of days between sample (not necessarily diagnosis) and census date OR date of death. NB Imperial provided 'Days after diagnosis: sample date', 'days after diagnosis: Death', 'Status Alive/Dead', 'Days after diagnosis: Last follow up'. NOT time to census - some 'Days after diagnosis: Last follow up' are negative. Where this leads to a negative DaysToEvent, numbers set to 0.
+
+Survivor: survival status of patient at census date (1 = dead, 0 = alive)
+
+12 Patients who have undergone transplant were removed before analysis. (2 Cambridge, 2 Imperial, 8 Sheffield)
+
+```{r, message = FALSE, warning = FALSE}
+library(survival)
+library(survminer)
+SurviveData <- read_excel("../Survival.xlsx", sheet = "All")
+#SampleID - sampleID to match to cluster membership
+#DaysToEvent - number of days between sample (not necessarily diagnosis) and census date OR date of death. NB Imperial provided 'Days after diagnosis: sample date', 'days after diagnosis: Death', 'Status Alive/Dead', 'Days after diagnosis: Last follow up'. NOT time to census - some 'Days after diagnosis: Last follow up' are negative. Where this leads to a negative DaysToEvent, numbers set to 0.
+#Survivor: survival status of patient at census date (1 = dead, 0 = alive)
+
+#SurviveData <- SurviveData %>% filter(Transplant == 'n')
+#Clusterpheno <- read_csv("Clusterpheno.csv")
+
+ForSurvival <- left_join(Clusterpheno, SurviveData, by = "SampleID")
+Bases<- survival::Surv(time = ForSurvival$DaysToEvent, event = ForSurvival$Survivor)
+Bases5<- survival::Surv(time = ForSurvival$DaysToEvent5yr, event = ForSurvival$Survivor5yr)
+
+survminer::ggsurvplot(
+    fit = survival::survfit(Bases ~ 1, data = ForSurvival), 
+    xlab = "Years", 
+    ylab = "Overall survival probability",
+    legend.title = "", risk.table = TRUE, xscale = "d_y")
+
+summary(survival::survfit(Bases ~ 1, data = ForSurvival), times = 365.25)
+```
+
+
+Median survival time: 
+
+```{r}
+survival::survfit(Bases ~ 1, data = ForSurvival)
+```
+
+## Age and sex
+
+```{r}
+survminer::ggsurvplot(
+    fit = survival::survfit(Bases ~ sex, data = ForSurvival), 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    legend.title = "",
+    palette=c("deeppink", "cornflowerblue"),
+    conf.int = TRUE, risk.table = TRUE)
+
+broom::tidy(coxph(Bases~sex+age, data = ForSurvival), exp = TRUE) %>% kable(., caption = "Cox regression") %>% kable_styling(full_width = TRUE)
+
+library(gtsummary)
+coxph(Bases~sex+age, data = ForSurvival) %>% gtsummary::tbl_regression(exp = TRUE)
+```
+
+## 2 Cluster survival
+
+### All time available
+
+```{r}
+survminer::ggsurvplot(
+    fit = survival::survfit(Bases ~ PH4_k2, data = ForSurvival), 
+    xlab = "Years", 
+    ylab = "Overall survival probability",
+    legend.title = "",
+    palette=c("deeppink", "midnight blue"),
+    risk.table = TRUE,  risk.table.height = 0.25, xscale = "d_y", break.time.by=365.25*2.5)
+
+
+broom::tidy(coxph(Bases~sex+age+PH4_k2, data = ForSurvival), exp = TRUE) %>% kable(., caption = "Cox regression: ~ sex + age + 2 clusters") %>% kable_styling(full_width = TRUE)
+coxph(Bases~sex+age+PH4_k2, data = ForSurvival) %>% gtsummary::tbl_regression(exp = TRUE)
+
+broom::tidy(coxph(Bases~PH4_k2, data = ForSurvival), exp = TRUE) %>% kable(., caption = "Cox regression: ~ 2 clusters") %>% kable_styling(full_width = TRUE)
+coxph(Bases~PH4_k2, data = ForSurvival) %>% gtsummary::tbl_regression(exp = TRUE)
+
+ggforest(coxph(Bases~sex+age+PH4_k2, data = ForSurvival))
+```
+
+
+### 5 year survival
+
+```{r}
+survminer::ggsurvplot(
+    fit = survival::survfit(Bases5 ~ PH4_k2, data = ForSurvival), 
+    xlab = "Years", 
+    ylab = "Overall survival probability",
+    legend.title = "",
+    palette=c("deeppink", "midnight blue"),
+    risk.table = TRUE,  risk.table.height = 0.25, xscale = "d_y", break.time.by=365.25*2.5)
+
+
+broom::tidy(coxph(Bases5~sex+age+PH4_k2, data = ForSurvival), exp = TRUE) %>% kable(., caption = "Cox regression: ~ sex + age + 2 clusters") %>% kable_styling(full_width = TRUE)
+coxph(Bases5~sex+age+PH4_k2, data = ForSurvival) %>% gtsummary::tbl_regression(exp = TRUE)
+
+broom::tidy(coxph(Bases5~PH4_k2, data = ForSurvival), exp = TRUE) %>% kable(., caption = "Cox regression: ~ 2 clusters") %>% kable_styling(full_width = TRUE)
+coxph(Bases5~PH4_k2, data = ForSurvival) %>% gtsummary::tbl_regression(exp = TRUE)
+
+ggforest(coxph(Bases5~sex+age+PH4_k2, data = ForSurvival))
+```
+
+
+
+
+
+## 7 Cluster survival
+
+### All time available
+
+```{r}
+survminer::ggsurvplot(
+    fit = survival::survfit(Bases ~ PH4_k8, data = ForSurvival), 
+    xlab = "Years", 
+    ylab = "Overall survival probability",
+    legend.title = "",
+    palette=c("deeppink","dark red", "darksalmon", "yellow", "midnight blue", "cornflowerblue", "grey", "black"),
+    risk.table = TRUE,  risk.table.height = 0.25, xscale = "d_y", break.time.by=365.25*2.5)
+
+
+broom::tidy(coxph(Bases~sex+age+PH4_k8, data = ForSurvival), exp = TRUE) %>% kable(., caption = "Cox regression: ~ sex + age + 7 clusters") %>% kable_styling(full_width = TRUE)
+coxph(Bases~sex+age+PH4_k8, data = ForSurvival) %>% gtsummary::tbl_regression(exp = TRUE)
+
+broom::tidy(coxph(Bases~PH4_k8, data = ForSurvival), exp = TRUE) %>% kable(., caption = "Cox regression: ~ 7 clusters") %>% kable_styling(full_width = TRUE)
+coxph(Bases~PH4_k8, data = ForSurvival) %>% gtsummary::tbl_regression(exp = TRUE)
+
+ggforest(coxph(Bases~sex+age+PH4_k8, data = ForSurvival))
+```
+
+
+### 5 year survival
+
+```{r}
+survminer::ggsurvplot(
+    fit = survival::survfit(Bases5 ~ PH4_k8, data = ForSurvival), 
+    xlab = "Years", 
+    ylab = "Overall survival probability",
+    legend.title = "",
+    palette=c("deeppink","dark red", "darksalmon", "yellow", "midnight blue", "cornflowerblue", "grey", "black"),
+    risk.table = TRUE,  risk.table.height = 0.25, xscale = "d_y", break.time.by=365.25*2.5)
+
+
+broom::tidy(coxph(Bases5~sex+age+PH4_k8, data = ForSurvival), exp = TRUE) %>% kable(., caption = "Cox regression: ~ sex + age + 7 clusters") %>% kable_styling(full_width = TRUE)
+coxph(Bases5~sex+age+PH4_k8, data = ForSurvival) %>% gtsummary::tbl_regression(exp = TRUE)
+
+broom::tidy(coxph(Bases5~PH4_k8, data = ForSurvival), exp = TRUE) %>% kable(., caption = "Cox regression: ~ 7 clusters") %>% kable_styling(full_width = TRUE)
+coxph(Bases5~PH4_k8, data = ForSurvival) %>% gtsummary::tbl_regression(exp = TRUE)
+
+ggforest(coxph(Bases5~sex+age+PH4_k8, data = ForSurvival))
+```
+
+
+
+
+
