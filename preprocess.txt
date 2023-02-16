@@ -1,0 +1,60 @@
+def remove_feature_due_to_missing(raw,percent):
+    '''
+    Parameters
+    ----------
+    raw : Dataframe
+        Dataframe containing raw data, where columnns are features and rows are observations.
+    percent : double
+        Tolerable missing percentage.
+
+    Returns
+    -------
+    processed : Dataframe
+        Dataframe containing features which are kept.
+    deleted : TYPE
+        Dataframe containing features which are deleted.
+    '''
+    processed = raw.copy()
+    missing = processed.isna().sum(axis = 0)
+    missing = missing <= processed.shape[0]*percent
+    deleted = processed.loc[:,~missing].copy()
+    processed = processed.loc[:,missing].copy()
+    
+    return processed, deleted
+    
+
+def correct_outlier(raw,sd_range):
+    '''
+    Parameters
+    ----------
+    raw : Dataframe
+        Dataframe containing raw data, where columnns are features and rows are observations.
+    sd_range : TYPE
+        Tolerable missing percentage.
+
+    Returns
+    -------
+    processed : Dataframe
+        Dataframe containing data that are imputated.
+    high_rep : List
+        .
+    low_rep : List
+        .
+    '''
+    processed = raw.copy()
+    high_rep = list()
+    low_rep = list()
+	
+    for item in processed.columns:
+        ave = processed.loc[:,item].mean()
+        var = processed.loc[:,item].std()
+        if ave-sd_range*var < 0:
+            low_limit = 0
+        else:
+            low_limit = ave-sd_range*var
+        processed.loc[processed.loc[:,item].isna(),item] = low_limit
+        processed.loc[processed.loc[:,item]>(ave+sd_range*var),item] = ave + sd_range*var
+        high_rep.append(ave + sd_range*var)
+        low_rep.append(low_limit)
+        
+    return processed,high_rep,low_rep
